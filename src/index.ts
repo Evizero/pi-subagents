@@ -8,6 +8,7 @@
  *
  * Commands:
  *   /agents                 — Interactive agent management menu
+ *   /review [target]        — Start a background Review sub-agent over changes or a commit
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
@@ -116,6 +117,19 @@ function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** Truncate long background-agent previews by line count instead of raw characters. */
+function truncatePreview(text: string, maxLines = 500, includeGetResultHint = true): string {
+  const lines = text.split("\n");
+  if (lines.length <= maxLines) return text;
+  const shownLines = Math.min(maxLines, lines.length);
+  const remainingLines = lines.length - shownLines;
+  const hint = includeGetResultHint
+    ? " Use get_subagent_result for full output."
+    : "";
+  return lines.slice(0, maxLines).join("\n") +
+    `\n... (${remainingLines} more lines truncated, ${lines.length} total,${hint})`;
+}
+
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
 function formatTaskNotification(record: AgentRecord, resultMaxLen: number): string {
   const status = getStatusLabel(record.status, record.error);
@@ -129,9 +143,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
   } catch { /* session stats unavailable */ }
 
   const resultPreview = record.result
-    ? record.result.length > resultMaxLen
-      ? record.result.slice(0, resultMaxLen) + "\n...(truncated, use get_subagent_result for full output)"
-      : record.result
+    ? truncatePreview(record.result, resultMaxLen, true)
     : "No output.";
 
   return [
@@ -187,9 +199,7 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
     outputFile: record.outputFile,
     error: record.error,
     resultPreview: record.result
-      ? record.result.length > resultMaxLen
-        ? record.result.slice(0, resultMaxLen) + "…"
-        : record.result
+      ? truncatePreview(record.result, resultMaxLen, false)
       : "No output.",
   };
 }
@@ -261,6 +271,7 @@ export default function (pi: ExtensionAPI) {
   // before they reach pi.sendMessage (fire-and-forget).
   const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
   const NUDGE_HOLD_MS = 200;
+
 
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
     cancelNudge(key);
@@ -563,8 +574,8 @@ ${typeListText}
 Guidelines:
 - For parallel work, use run_in_background: true on each agent. Foreground calls run sequentially — only one executes at a time.
 - Use Explore for codebase searches and code understanding.
-- Use Plan for architecture and implementation planning.
-- Use general-purpose for complex tasks that need file editing.
+- Use Review for code review, diff review, and commit review.
+- Use general-purpose only if asked explicitly; useful for complex tasks that need file editing.
 - Provide clear, detailed prompts so the agent can work autonomously.
 - Agent results are returned as text — summarize them for the user.
 - Use run_in_background for work you don't need immediately. You will be notified when it completes.
@@ -587,7 +598,7 @@ Guidelines:
       model: Type.Optional(
         Type.String({
           description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "opus", "openai/gpt-5.4"). Omit to use the agent type\'s default.',
         }),
       ),
       thinking: Type.Optional(
@@ -729,6 +740,12 @@ Guidelines:
 
       const rawType = params.subagent_type as SubagentType;
       const resolved = resolveType(rawType);
+      const resolvedConfig = resolved ? getAgentConfig(resolved) : undefined;
+      if (resolved && resolvedConfig?.enabled === false) {
+        return textResult(
+          `Agent type "${resolved}" is disabled. Enable it in /agents or remove enabled: false from its .md file.`,
+        );
+      }
       const subagentType = resolved ?? "general-purpose";
       const fellBack = resolved === undefined;
 
@@ -1663,6 +1680,136 @@ ${systemPrompt}
       }
     }
   }
+
+  interface ReviewRequestSpec {
+    prompt: string;
+    description: string;
+    target: string;
+  }
+
+  async function gitStdout(args: string[], cwd: string): Promise<string | undefined> {
+    try {
+      const result = await pi.exec("git", args, { cwd, timeout: 5000 });
+      const stdout = typeof result.stdout === "string" ? result.stdout.trim() : "";
+      return result.code === 0 && stdout ? stdout : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function buildReviewRequest(args: string, cwd: string): Promise<ReviewRequestSpec> {
+    const trimmed = args.trim();
+
+    if (!trimmed || /^(current|changes|working-tree|workingtree)$/i.test(trimmed)) {
+      return {
+        prompt: "Review the current code changes (staged, unstaged, and untracked files) and provide prioritized findings.",
+        description: "Review current changes",
+        target: "current changes",
+      };
+    }
+
+    const branchMatch = trimmed.match(/^(?:branch|base)\s+(.+)$/i);
+    if (branchMatch) {
+      const branch = branchMatch[1].trim();
+      const mergeBaseSha = await gitStdout(["merge-base", "HEAD", branch], cwd);
+      return {
+        prompt: mergeBaseSha
+          ? `Review the code changes against the base branch '${branch}'. The merge base commit for this comparison is ${mergeBaseSha}. Run \`git diff ${mergeBaseSha}\` to inspect the changes relative to ${branch}. Provide prioritized, actionable findings.`
+          : `Review the code changes against the base branch '${branch}'. Start by finding the merge diff between the current branch and ${branch}'s upstream, then run \`git diff\` against that SHA to inspect the changes we would merge into ${branch}. Provide prioritized, actionable findings.`,
+        description: `Review vs ${branch}`,
+        target: `changes against '${branch}'`,
+      };
+    }
+
+    const commitMatch = trimmed.match(/^commit\s+(.+)$/i);
+    if (commitMatch) {
+      const sha = commitMatch[1].trim();
+      const title = await gitStdout(["log", "-1", "--format=%s", sha], cwd);
+      const shortSha = sha.slice(0, 7);
+      return {
+        prompt: title
+          ? `Review the code changes introduced by commit ${sha} (\"${title}\"). Provide prioritized, actionable findings.`
+          : `Review the code changes introduced by commit ${sha}. Provide prioritized, actionable findings.`,
+        description: `Review commit ${shortSha}`,
+        target: title ? `commit ${shortSha}: ${title}` : `commit ${shortSha}`,
+      };
+    }
+
+    return {
+      prompt: trimmed,
+      description: "Custom review",
+      target: trimmed,
+    };
+  }
+
+  pi.registerCommand("review", {
+    description: "Start the Review sub-agent in the background (usage: /review [branch <name> | commit <sha> | <custom instructions>])",
+    getArgumentCompletions: (prefix) => {
+      const items = [
+        { value: "current", label: "current — review staged, unstaged, and untracked changes" },
+        { value: "branch ", label: "branch <name> — review changes against a base branch" },
+        { value: "commit ", label: "commit <sha> — review a specific commit" },
+      ];
+      const normalized = prefix.toLowerCase();
+      return items.filter((item) => item.value.startsWith(normalized)).length > 0
+        ? items.filter((item) => item.value.startsWith(normalized))
+        : items;
+    },
+    handler: async (args, ctx) => {
+      widget.setUICtx(ctx.ui as UICtx);
+      reloadCustomAgents();
+
+      if (!ctx.isIdle()) {
+        ctx.ui.notify("Waiting for the current turn to finish...", "info");
+        await ctx.waitForIdle();
+      }
+
+      const reviewConfig = getAgentConfig("Review");
+      if (!reviewConfig || reviewConfig.enabled === false) {
+        ctx.ui.notify("Review agent is disabled. Enable it in /agents or remove enabled: false from its .md file.", "error");
+        return;
+      }
+
+      const request = await buildReviewRequest(args, ctx.cwd);
+      const { state: bgState, callbacks: bgCallbacks } = createActivityTracker();
+
+      const id = manager.spawn(pi, ctx, "Review", request.prompt, {
+        description: request.description,
+        thinkingLevel: "high",
+        isBackground: true,
+        ...bgCallbacks,
+      });
+
+      const joinMode: JoinMode = defaultJoinMode;
+      const record = manager.getRecord(id);
+      if (record) record.joinMode = joinMode;
+
+      if (joinMode !== "async") {
+        currentBatchAgents.push({ id, joinMode });
+        if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
+        batchFinalizeTimer = setTimeout(finalizeBatch, 100);
+      }
+
+      agentActivity.set(id, bgState);
+      widget.ensureTimer();
+      widget.update();
+
+      pi.events.emit("subagents:created", {
+        id,
+        type: "Review",
+        description: request.description,
+        isBackground: true,
+      });
+
+      const isQueued = record?.status === "queued";
+      ctx.ui.notify(
+        isQueued
+          ? `Queued review: ${request.target}`
+          : `Started review: ${request.target}`,
+        "info",
+      );
+    },
+  });
 
   pi.registerCommand("agents", {
     description: "Manage agents",

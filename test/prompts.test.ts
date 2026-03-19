@@ -47,11 +47,12 @@ describe("buildAgentPrompt", () => {
     expect(prompt).toContain("file search specialist");
   });
 
-  it("Plan prompt is read-only", () => {
-    const config = getDefaultConfig("Plan");
+  it("Review prompt is read-only and review-focused", () => {
+    const config = getDefaultConfig("Review");
     const prompt = buildAgentPrompt(config, "/workspace", env);
     expect(prompt).toContain("READ-ONLY");
-    expect(prompt).toContain("software architect");
+    expect(prompt).toContain("code review specialist");
+    expect(prompt).toContain("Findings");
   });
 
   it("general-purpose uses append mode (parent twin)", () => {

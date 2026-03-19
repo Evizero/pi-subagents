@@ -101,9 +101,9 @@ Group completions render each agent as a separate block. The LLM receives struct
 |------|-------|-------|-------------|-------------|
 | `general-purpose` | all 7 | inherit | `append` (parent twin) | Inherits the parent's full system prompt — same rules, CLAUDE.md, project conventions |
 | `Explore` | read, bash, grep, find, ls | haiku (falls back to inherit) | `replace` (standalone) | Fast codebase exploration (read-only) |
-| `Plan` | read, bash, grep, find, ls | inherit | `replace` (standalone) | Software architect for implementation planning (read-only) |
+| `Review` | read, bash, grep, find, ls | `gpt-5.4` (falls back to inherit) | `replace` (standalone) | Code review specialist for diffs, branches, and commits (read-only) |
 
-The `general-purpose` agent is a **parent twin** — it receives the parent's entire system prompt plus a sub-agent context bridge, so it follows the same rules the parent does. Explore and Plan use standalone prompts tailored to their read-only roles.
+The `general-purpose` agent is a **parent twin** — it receives the parent's entire system prompt plus a sub-agent context bridge, so it follows the same rules the parent does. Explore and Review use standalone prompts tailored to their read-only roles.
 
 Default agents can be **ejected** (`/agents` → select agent → Eject) to export them as `.md` files for customization, **overridden** by creating a `.md` file with the same name (e.g. `.pi/agents/general-purpose.md`), or **disabled** per-project with `enabled: false` frontmatter.
 
@@ -216,6 +216,7 @@ Send a steering message to a running agent. The message interrupts after the cur
 | Command | Description |
 |---------|-------------|
 | `/agents` | Interactive agent management menu |
+| `/review [target]` | Start the built-in `Review` agent in the background over current changes, a base branch, a commit, or custom review instructions |
 
 The `/agents` command opens an interactive menu:
 
@@ -235,6 +236,13 @@ Settings                                    ← max concurrency, max turns, grac
 - **Disable/Enable** — toggle agent availability. Disabled agents stay visible in the list (marked `✕`) and can be re-enabled
 - **Create new agent** — choose project/personal location, then manual wizard (step-by-step prompts for name, tools, model, thinking, system prompt) or AI-generated (describe what the agent should do and a sub-agent writes the `.md` file). Any name is allowed, including default agent names (overrides them)
 - **Settings** — configure max concurrency, default max turns, grace turns, and join mode at runtime
+
+The `/review` command starts the built-in `Review` agent in the background. It appears in the widget and `/agents`, and it finishes through the normal background-agent completion flow. Starting the review does not send a chat follow-up message. Usage:
+
+- `/review` or `/review current` — review staged, unstaged, and untracked changes
+- `/review branch main` — review changes relative to a base branch
+- `/review commit abc1234` — review a specific commit
+- `/review <custom instructions>` — run a custom review prompt through the `Review` agent
 
 ## Graceful Max Turns
 
@@ -416,7 +424,7 @@ This is useful for creating agents that inherit extension tools but should not h
 src/
   index.ts            # Extension entry: tool/command registration, rendering
   types.ts            # Type definitions (AgentConfig, AgentRecord, etc.)
-  default-agents.ts   # Embedded default agent configs (general-purpose, Explore, Plan)
+  default-agents.ts   # Embedded default agent configs (general-purpose, Explore, Review)
   agent-types.ts      # Unified agent registry (defaults + user), tool factories
   agent-runner.ts     # Session creation, execution, graceful max_turns, steer/resume
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
