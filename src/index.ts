@@ -1486,7 +1486,7 @@ The file format is a markdown file with YAML frontmatter and a system prompt bod
 \`\`\`markdown
 ---
 description: <one-line description shown in UI>
-tools: <comma-separated built-in tools: read, bash, edit, write, grep, find, ls. Use "none" for no tools. Omit for all tools>
+tools: <comma-separated built-in tools: read, bash, edit, write, grep, find, ls. Use "all" or omit for all tools. Use "none" for no tools>
 model: <optional model as "provider/modelId", e.g. "anthropic/claude-haiku-4-5-20251001". Omit to inherit parent model>
 thinking: <optional thinking level: off, minimal, low, medium, high, xhigh. Omit to inherit>
 max_turns: <optional max agentic turns. 0 or omit for unlimited (default)>
@@ -1700,11 +1700,15 @@ ${systemPrompt}
   async function buildReviewRequest(args: string, cwd: string): Promise<ReviewRequestSpec> {
     const trimmed = args.trim();
 
-    if (!trimmed || /^(current|changes|working-tree|workingtree)$/i.test(trimmed)) {
+    const currentMatch = trimmed.match(/^(?:current|changes|working-tree|workingtree)(?:\s+(.*))?$/i);
+    if (!trimmed || currentMatch) {
+      const extraInstructions = currentMatch?.[1]?.trim();
       return {
-        prompt: "Review the current code changes (staged, unstaged, and untracked files) and provide prioritized findings.",
+        prompt: extraInstructions
+          ? `Review the current code changes (staged, unstaged, and untracked files) and provide prioritized findings. Additional review instructions: ${extraInstructions}`
+          : "Review the current code changes (staged, unstaged, and untracked files) and provide prioritized findings.",
         description: "Review current changes",
-        target: "current changes",
+        target: extraInstructions ? `current changes — ${extraInstructions}` : "current changes",
       };
     }
 
@@ -1743,17 +1747,16 @@ ${systemPrompt}
   }
 
   pi.registerCommand("review", {
-    description: "Start the Review sub-agent in the background (usage: /review [branch <name> | commit <sha> | <custom instructions>])",
+    description: "Start the Review sub-agent in the background (usage: /review [current <instructions> | branch <name> | commit <sha> | <custom instructions>])",
     getArgumentCompletions: (prefix) => {
       const items = [
-        { value: "current", label: "current — review staged, unstaged, and untracked changes" },
+        { value: "current ", label: "current [instructions] — review staged, unstaged, and untracked changes" },
         { value: "branch ", label: "branch <name> — review changes against a base branch" },
         { value: "commit ", label: "commit <sha> — review a specific commit" },
       ];
       const normalized = prefix.toLowerCase();
-      return items.filter((item) => item.value.startsWith(normalized)).length > 0
-        ? items.filter((item) => item.value.startsWith(normalized))
-        : items;
+      const matches = items.filter((item) => item.value.startsWith(normalized));
+      return matches.length > 0 ? matches : items;
     },
     handler: async (args, ctx) => {
       widget.setUICtx(ctx.ui as UICtx);

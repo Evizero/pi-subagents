@@ -10,6 +10,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionAPI,
+  type ResourceLoader,
   SessionManager,
   SettingsManager,
 } from "@mariozechner/pi-coding-agent";
@@ -17,7 +18,7 @@ import { getAgentConfig, getConfig, getMemoryTools, getReadOnlyMemoryTools, getT
 import { buildParentContext, extractText } from "./context.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
-import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
+import { buildAgentPrompt, buildAppendModeSystemPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
 
@@ -164,8 +165,6 @@ export async function runAgent(
   const effectiveCwd = options.cwd ?? ctx.cwd;
 
   const env = await detectEnv(options.pi, effectiveCwd);
-
-  // Get parent system prompt for append-mode agents
   const parentSystemPrompt = ctx.getSystemPrompt();
 
   // Build prompt extras (memory, skill preloading)
@@ -208,40 +207,96 @@ export async function runAgent(
     }
   }
 
-  // Build system prompt from agent config
-  let systemPrompt: string;
-  if (agentConfig) {
-    systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras);
-  } else {
-    // Unknown type fallback: general-purpose (defensive — unreachable in practice
-    // since index.ts resolves unknown types to "general-purpose" before calling runAgent)
-    systemPrompt = buildAgentPrompt({
-      name: type,
-      description: "General-purpose agent",
-      systemPrompt: "",
-      promptMode: "append",
-      extensions: true,
-      skills: true,
-      inheritContext: false,
-      runInBackground: false,
-      isolated: false,
-    }, effectiveCwd, env, parentSystemPrompt, extras);
-  }
+  // Build system prompt from agent config. For append-mode agents we start from the
+  // subagent's own base prompt so tool declarations always match the subagent runtime.
+  const promptConfig = agentConfig ?? {
+    name: type,
+    description: "General-purpose agent",
+    systemPrompt: "",
+    promptMode: "append" as const,
+    extensions: true,
+    skills: true,
+    inheritContext: false,
+    runInBackground: false,
+    isolated: false,
+  };
+
+  // Build disallowed tools set from agent config
+  const disallowedSet = agentConfig?.disallowedTools
+    ? new Set(agentConfig.disallowedTools)
+    : undefined;
 
   // When skills is string[], we've already preloaded them into the prompt.
   // Still pass noSkills: true since we don't need the skill loader to load them again.
   const noSkills = skills === false || Array.isArray(skills);
 
-  // Load extensions/skills: true or string[] → load; false → don't
-  const loader = new DefaultResourceLoader({
+  // First pass loader: discover extension tools, context files, append files, and optional skills.
+  let loader: ResourceLoader = new DefaultResourceLoader({
     cwd: effectiveCwd,
     noExtensions: extensions === false,
     noSkills,
     noPromptTemplates: true,
     noThemes: true,
-    systemPromptOverride: () => systemPrompt,
   });
   await loader.reload();
+
+  if (promptConfig.promptMode === "append") {
+    const toolNames = tools
+      .map(t => t.name)
+      .filter(name => !disallowedSet?.has(name));
+    const toolSnippets: Record<string, string> = {};
+    const promptGuidelines: string[] = [];
+
+    for (const extension of loader.getExtensions().extensions) {
+      for (const [toolName, registeredTool] of extension.tools) {
+        if (EXCLUDED_TOOL_NAMES.includes(toolName)) continue;
+        if (disallowedSet?.has(toolName)) continue;
+        if (Array.isArray(extensions) && !extensions.some(ext => toolName.startsWith(ext) || toolName.includes(ext))) {
+          continue;
+        }
+        if (!toolNames.includes(toolName)) toolNames.push(toolName);
+        toolSnippets[toolName] = registeredTool.definition.promptSnippet ?? registeredTool.definition.description;
+        if (registeredTool.definition.promptGuidelines?.length) {
+          promptGuidelines.push(...registeredTool.definition.promptGuidelines);
+        }
+      }
+    }
+
+    const synthesizedPrompt = buildAppendModeSystemPrompt(promptConfig, effectiveCwd, env, {
+      tools: { toolNames, toolSnippets, promptGuidelines },
+      parentSystemPrompt,
+      extras,
+    });
+
+    // Reuse the already-loaded resources and extensions. The synthesized prompt provides
+    // the primary tool-aware prompt and inherited parent constraints, while the loader's
+    // own project context / skills / APPEND_SYSTEM remain available to pi for normal
+    // prompt assembly and /skill discovery in the effective cwd.
+    const baseLoader = loader;
+    const wrappedLoader: ResourceLoader = {
+      getExtensions: () => baseLoader.getExtensions(),
+      getSkills: () => baseLoader.getSkills(),
+      getPrompts: () => baseLoader.getPrompts(),
+      getThemes: () => baseLoader.getThemes(),
+      getAgentsFiles: () => baseLoader.getAgentsFiles(),
+      getSystemPrompt: () => synthesizedPrompt,
+      getAppendSystemPrompt: () => baseLoader.getAppendSystemPrompt(),
+      getPathMetadata: () => baseLoader.getPathMetadata(),
+      extendResources: (paths) => baseLoader.extendResources(paths),
+      reload: async () => {},
+    };
+    loader = wrappedLoader;
+  } else {
+    loader = new DefaultResourceLoader({
+      cwd: effectiveCwd,
+      noExtensions: extensions === false,
+      noSkills,
+      noPromptTemplates: true,
+      noThemes: true,
+      systemPromptOverride: () => buildAgentPrompt(promptConfig, effectiveCwd, env, undefined, extras),
+    });
+    await loader.reload();
+  }
 
   // Resolve model: explicit option > config.model > parent model
   const model = options.model ?? resolveDefaultModel(
@@ -266,11 +321,6 @@ export async function runAgent(
 
   // createAgentSession's type signature may not include thinkingLevel yet
   const { session } = await createAgentSession(sessionOpts as Parameters<typeof createAgentSession>[0]);
-
-  // Build disallowed tools set from agent config
-  const disallowedSet = agentConfig?.disallowedTools
-    ? new Set(agentConfig.disallowedTools)
-    : undefined;
 
   // Filter active tools: remove our own tools to prevent nesting,
   // apply extension allowlist if specified, and apply disallowedTools denylist

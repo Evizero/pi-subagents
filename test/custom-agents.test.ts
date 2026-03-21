@@ -16,7 +16,7 @@ describe("loadCustomAgents", () => {
   });
 
   afterEach(() => {
-    if (originalHome == null) delete process.env.HOME;
+    if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -109,6 +109,17 @@ No tools.`);
 
     const result = loadCustomAgents(tmpDir);
     expect(result.get("notool")!.builtinToolNames).toEqual([]);
+  });
+
+  it("handles tools: all → all built-in tools", () => {
+    writeAgent("alltools", `---
+tools: all
+---
+
+All tools.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("alltools")!.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
   });
 
   it("handles extensions: false → no extensions", () => {

@@ -13,7 +13,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 ## Features
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
-- **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 4) and smart group join (consolidated notifications)
+- **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 10) and smart group join (consolidated notifications)
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause)
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
@@ -99,11 +99,11 @@ Group completions render each agent as a separate block. The LLM receives struct
 
 | Type | Tools | Model | Prompt Mode | Description |
 |------|-------|-------|-------------|-------------|
-| `general-purpose` | all 7 | inherit | `append` (parent twin) | Inherits the parent's full system prompt — same rules, CLAUDE.md, project conventions |
+| `general-purpose` | all 7 | inherit | `append` | Uses its own tool-aware base prompt, then appends sub-agent guidance so tool declarations stay accurate |
 | `Explore` | read, bash, grep, find, ls | haiku (falls back to inherit) | `replace` (standalone) | Fast codebase exploration (read-only) |
 | `Review` | read, bash, grep, find, ls | `gpt-5.4` (falls back to inherit) | `replace` (standalone) | Code review specialist for diffs, branches, and commits (read-only) |
 
-The `general-purpose` agent is a **parent twin** — it receives the parent's entire system prompt plus a sub-agent context bridge, so it follows the same rules the parent does. Explore and Review use standalone prompts tailored to their read-only roles.
+The `general-purpose` agent uses **append mode** — it keeps its own tool-aware base prompt and appends the sub-agent context bridge on top. This avoids stale parent tool declarations while still preserving normal pi project conventions through the subagent's own resource loading. Explore and Review use standalone prompts tailored to their read-only roles.
 
 Default agents can be **ejected** (`/agents` → select agent → Eject) to export them as `.md` files for customization, **overridden** by creating a `.md` file with the same name (e.g. `.pi/agents/general-purpose.md`), or **disabled** per-project with `enabled: false` frontmatter.
 
@@ -154,7 +154,7 @@ All fields are optional — sensible defaults for everything.
 |-------|---------|-------------|
 | `description` | filename | Agent description shown in tool listings |
 | `display_name` | — | Display name for UI (e.g. widget, agent list) |
-| `tools` | all 7 | Comma-separated built-in tools: read, bash, edit, write, grep, find, ls. `none` for no tools |
+| `tools` | all 7 | Comma-separated built-in tools: read, bash, edit, write, grep, find, ls. `all` or omit for all tools, `none` for no tools |
 | `extensions` | `true` | Inherit MCP/extension tools. `false` to disable |
 | `skills` | `true` | Inherit skills from parent. Can be a comma-separated list of skill names to preload from `.pi/skills/` |
 | `memory` | — | Persistent agent memory scope: `project`, `local`, or `user`. Auto-detects read-only agents |
@@ -163,7 +163,7 @@ All fields are optional — sensible defaults for everything.
 | `model` | inherit parent | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`) |
 | `thinking` | inherit | off, minimal, low, medium, high, xhigh |
 | `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited |
-| `prompt_mode` | `replace` | `replace`: body is the full system prompt. `append`: body appended to parent's prompt (agent acts as a "parent twin" with optional extra instructions) |
+| `prompt_mode` | `replace` | `replace`: body is the full system prompt. `append`: body is appended to the subagent's own default system prompt |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `run_in_background` | `false` | Run in background by default |
 | `isolation` | — | `worktree`: run in a temporary git worktree for full repo isolation |
@@ -239,7 +239,7 @@ Settings                                    ← max concurrency, max turns, grac
 
 The `/review` command starts the built-in `Review` agent in the background. It appears in the widget and `/agents`, and it finishes through the normal background-agent completion flow. Starting the review does not send a chat follow-up message. Usage:
 
-- `/review` or `/review current` — review staged, unstaged, and untracked changes
+- `/review` or `/review current [instructions]` — review staged, unstaged, and untracked changes, optionally with extra instructions
 - `/review branch main` — review changes relative to a base branch
 - `/review commit abc1234` — review a specific commit
 - `/review <custom instructions>` — run a custom review prompt through the `Review` agent
@@ -261,7 +261,7 @@ Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 
 ## Concurrency
 
-Background agents are subject to a configurable concurrency limit (default: 4). Excess agents are automatically queued and start as running agents complete. The widget shows queued agents as a collapsed count.
+Background agents are subject to a configurable concurrency limit (default: 10). Excess agents are automatically queued and start as running agents complete. The widget shows queued agents as a collapsed count.
 
 Foreground agents bypass the queue — they block the parent anyway.
 

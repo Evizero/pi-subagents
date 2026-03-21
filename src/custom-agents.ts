@@ -55,7 +55,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       name,
       displayName: str(fm.display_name),
       description: str(fm.description) ?? name,
-      builtinToolNames: csvList(fm.tools, BUILTIN_TOOL_NAMES),
+      builtinToolNames: toolList(fm.tools),
       disallowedTools: csvListOptional(fm.disallowed_tools),
       extensions: inheritField(fm.extensions ?? fm.inherit_extensions),
       skills: inheritField(fm.skills ?? fm.inherit_skills),
@@ -97,6 +97,17 @@ function parseCsvField(val: unknown): string[] | undefined {
   if (!s || s === "none") return undefined;
   const items = s.split(",").map(t => t.trim()).filter(Boolean);
   return items.length > 0 ? items : undefined;
+}
+
+/**
+ * Parse the built-in tools field.
+ * omitted → all tools; "all" → all tools; "none"/empty → []; csv → listed items.
+ */
+function toolList(val: unknown): string[] {
+  if (val === undefined || val === null) return BUILTIN_TOOL_NAMES;
+  const s = String(val).trim();
+  if (s === "all") return BUILTIN_TOOL_NAMES;
+  return parseCsvField(val) ?? [];
 }
 
 /**

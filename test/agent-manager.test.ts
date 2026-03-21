@@ -35,6 +35,11 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
     manager?.dispose();
   });
 
+  it("defaults background concurrency to 10", () => {
+    manager = new AgentManager();
+    expect(manager.getMaxConcurrent()).toBe(10);
+  });
+
   it("reproduces bug: onComplete fires with resultConsumed=false when set after await", async () => {
     let seenConsumed: boolean | undefined;
     manager = new AgentManager((r) => {

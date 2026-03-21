@@ -116,10 +116,10 @@ export function getDisplayName(type: SubagentType): string {
   return getConfig(type).displayName;
 }
 
-/** Short label for prompt mode: "twin" for append, nothing for replace (the default). */
+/** Short label for prompt mode: "append" for append-mode agents, nothing for replace (the default). */
 export function getPromptModeLabel(type: SubagentType): string | undefined {
   const config = getConfig(type);
-  return config.promptMode === "append" ? "twin" : undefined;
+  return config.promptMode === "append" ? "append" : undefined;
 }
 
 /** Truncate text to a single line, max `len` chars. */
