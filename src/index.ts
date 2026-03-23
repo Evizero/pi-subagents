@@ -738,7 +738,8 @@ Guidelines:
 - Use resume with an agent ID to continue a previous agent's work.
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
-- Use thinking to control extended thinking level.
+- Prefer leaving thinking unspecified so the agent keeps its default reasoning level. Only override thinking when you have a clear reason.
+- Prefer leaving max_turns unspecified so the agent can use the default limit. Only set max_turns when you have a clear reason to constrain it.
 - Use inherit_context if the agent needs the parent conversation history.
 - Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).`,
     parameters: Type.Object({
@@ -759,12 +760,12 @@ Guidelines:
       ),
       thinking: Type.Optional(
         Type.String({
-          description: "Thinking level: off, minimal, low, medium, high, xhigh. Overrides agent default.",
+          description: "Thinking level: off, minimal, low, medium, high, xhigh. Prefer omitting this to keep the agent's default; only override when you have a clear reason.",
         }),
       ),
       max_turns: Type.Optional(
         Type.Number({
-          description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
+          description: "Maximum number of agentic turns before stopping. Omit or set to 0 for unlimited (default); only set this when you have a clear reason.",
           minimum: 1,
         }),
       ),
@@ -1666,6 +1667,8 @@ isolation: <"worktree" to run in isolated git worktree. Omit for normal>
 Guidelines for choosing settings:
 - For read-only tasks (review, analysis): tools: read, bash, grep, find, ls
 - For code modification tasks: include edit, write
+- Prefer omitting thinking so the agent keeps its default reasoning level; only set it when you have a clear reason to change it
+- Prefer omitting max_turns so the agent uses the default limit; only set it when you have a clear reason to constrain it
 - Use prompt_mode: append if the agent should keep the default system prompt and add specialization on top
 - Use prompt_mode: replace for fully custom agents with their own personality/instructions
 - Set inherit_context: true if the agent needs to know what was discussed in the parent conversation

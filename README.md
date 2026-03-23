@@ -58,6 +58,8 @@ Agent({
 
 Foreground agents block until complete and return results inline. Background agents return an ID immediately and notify you on completion.
 
+**Guidance:** prefer leaving `thinking` and `max_turns` unset unless you have a good reason to override them. That preserves each agent's default reasoning level and default turn budget — especially important for agents like `Review`, whose default thinking is intentionally higher.
+
 ## UI
 
 The extension renders a persistent widget above the editor showing all active agents:
@@ -161,8 +163,8 @@ All fields are optional — sensible defaults for everything.
 | `disallowed_tools` | — | Comma-separated tools to deny even if extensions provide them |
 | `isolation` | — | Set to `worktree` to run in an isolated git worktree |
 | `model` | inherit parent | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`) |
-| `thinking` | inherit | off, minimal, low, medium, high, xhigh |
-| `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited |
+| `thinking` | inherit | off, minimal, low, medium, high, xhigh. Prefer omitting this unless you have a good reason to override the agent default |
+| `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited. Prefer omitting this unless you have a good reason to constrain the default |
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt. `append`: body is appended to the subagent's own default system prompt |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `run_in_background` | `false` | Run in background by default |
@@ -184,8 +186,8 @@ Launch a sub-agent.
 | `description` | string | yes | Short 3-5 word summary (shown in UI) |
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
 | `model` | string | no | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`) |
-| `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh |
-| `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
+| `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh. Prefer leaving unset to keep the agent default |
+| `max_turns` | number | no | Max agentic turns. Omit or set to `0` for unlimited (default). Prefer leaving unset to keep the default behavior |
 | `run_in_background` | boolean | no | Run without blocking |
 | `resume` | string | no | Agent ID to resume a previous session |
 | `isolated` | boolean | no | No extension/MCP tools |
