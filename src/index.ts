@@ -41,6 +41,7 @@ import {
   SPINNER,
   type UICtx,
 } from "./ui/agent-widget.js";
+import { ReportWidgetController } from "./ui/report-widget.js";
 
 // ---- Shared helpers ----
 
@@ -263,8 +264,42 @@ export default function (pi: ExtensionAPI) {
   // Initial load
   reloadCustomAgents();
 
-  // ---- Agent activity tracking + widget ----
+  // ---- Agent activity tracking + widgets ----
   const agentActivity = new Map<string, AgentActivity>();
+  let currentSessionId: string | undefined;
+  let manager!: AgentManager;
+  const reportWidget = new ReportWidgetController((id) => manager.getRecord(id));
+
+  function isCurrentSessionRecord(record: Pick<AgentRecord, "sessionId">): boolean {
+    return !record.sessionId || !currentSessionId || record.sessionId === currentSessionId;
+  }
+
+  function setCurrentSessionId(sessionId: string | undefined) {
+    if (currentSessionId !== sessionId) {
+      currentSessionId = sessionId;
+      widget.setSessionId(sessionId);
+      reportWidget.setSessionId(sessionId);
+    }
+  }
+
+  function showToolLaunchedReportBlock(record: AgentRecord) {
+    if (record.origin !== "tool") return;
+    if (!isCurrentSessionRecord(record)) return;
+
+    const displayName = getDisplayName(record.type);
+    const duration = formatDuration(record.startedAt, record.completedAt);
+    const status = getStatusLabel(record.status, record.error);
+    const tokens = safeFormatTokens(record.session);
+    const toolStats = tokens ? `Tools: ${record.toolUses} | ${tokens}` : `Tools: ${record.toolUses}`;
+
+    reportWidget.show({
+      id: record.id,
+      sessionId: record.sessionId,
+      title: `${displayName} (${record.description})`,
+      meta: `status: ${status} · ${toolStats} · ${duration} · id: ${record.id}`,
+      text: record.result ?? record.error ?? "No output.",
+    });
+  }
 
   // ---- Cancellable pending notifications ----
   // Holds notifications briefly so get_subagent_result can cancel them
@@ -291,7 +326,7 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Individual nudge helper (async join mode) ----
   function emitIndividualNudge(record: AgentRecord) {
-    if (record.resultConsumed) return;  // re-check at send time
+    if (record.resultConsumed || record.notificationDelivered) return;  // re-check at send time
 
     const notification = formatTaskNotification(record, 500);
     const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
@@ -302,6 +337,9 @@ export default function (pi: ExtensionAPI) {
       display: true,
       details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
     }, { deliverAs: "followUp", triggerTurn: true });
+
+    record.notificationDelivered = true;
+    showToolLaunchedReportBlock(record);
   }
 
   function sendIndividualNudge(record: AgentRecord) {
@@ -311,39 +349,83 @@ export default function (pi: ExtensionAPI) {
     widget.update();
   }
 
-  // ---- Group join manager ----
-  const groupJoin = new GroupJoinManager(
-    (records, partial) => {
-      for (const r of records) { agentActivity.delete(r.id); widget.markFinished(r.id); }
+  function deliverGroupedCompletion(records: AgentRecord[], partial: boolean) {
+    const currentSessionRecords = records.filter(isCurrentSessionRecord);
 
-      const groupKey = `group:${records.map(r => r.id).join(",")}`;
-      scheduleNudge(groupKey, () => {
-        // Re-check at send time
-        const unconsumed = records.filter(r => !r.resultConsumed);
-        if (unconsumed.length === 0) { widget.update(); return; }
+    for (const r of records) {
+      agentActivity.delete(r.id);
+      if (isCurrentSessionRecord(r)) {
+        widget.markFinished(r.id);
+      }
+    }
 
-        const notifications = unconsumed.map(r => formatTaskNotification(r, 300)).join('\n\n');
-        const label = partial
-          ? `${unconsumed.length} agent(s) finished (partial — others still running)`
-          : `${unconsumed.length} agent(s) finished`;
-
-        const [first, ...rest] = unconsumed;
-        const details = buildNotificationDetails(first, 300, agentActivity.get(first.id));
-        if (rest.length > 0) {
-          details.others = rest.map(r => buildNotificationDetails(r, 300, agentActivity.get(r.id)));
-        }
-
-        pi.sendMessage<NotificationDetails>({
-          customType: "subagent-notification",
-          content: `Background agent group completed: ${label}\n\n${notifications}\n\nUse get_subagent_result for full output.`,
-          display: true,
-          details,
-        }, { deliverAs: "followUp", triggerTurn: true });
-      });
+    const unconsumed = currentSessionRecords.filter(r => !r.resultConsumed && !r.notificationDelivered);
+    if (unconsumed.length === 0) {
       widget.update();
-    },
-    30_000,
-  );
+      return;
+    }
+
+    const groupKey = `group:${currentSessionRecords.map(r => r.id).join(",")}`;
+    scheduleNudge(groupKey, () => {
+      const stillUnconsumed = currentSessionRecords.filter(r => !r.resultConsumed && !r.notificationDelivered);
+      if (stillUnconsumed.length === 0) { widget.update(); return; }
+
+      const notifications = stillUnconsumed.map(r => formatTaskNotification(r, 300)).join('\n\n');
+      const label = partial
+        ? `${stillUnconsumed.length} agent(s) finished (partial — others still running)`
+        : `${stillUnconsumed.length} agent(s) finished`;
+
+      const [first, ...rest] = stillUnconsumed;
+      const details = buildNotificationDetails(first, 300, agentActivity.get(first.id));
+      if (rest.length > 0) {
+        details.others = rest.map(r => buildNotificationDetails(r, 300, agentActivity.get(r.id)));
+      }
+
+      pi.sendMessage<NotificationDetails>({
+        customType: "subagent-notification",
+        content: `Background agent group completed: ${label}\n\n${notifications}\n\nUse get_subagent_result for full output.`,
+        display: true,
+        details,
+      }, { deliverAs: "followUp", triggerTurn: true });
+
+      for (const record of stillUnconsumed) {
+        record.notificationDelivered = true;
+        showToolLaunchedReportBlock(record);
+      }
+      widget.update();
+    });
+  }
+
+  function deliverDeferredCurrentSessionCompletions() {
+    const pending = manager.listAgents()
+      .filter((record) =>
+        isCurrentSessionRecord(record)
+        && record.status !== "running"
+        && record.status !== "queued"
+        && !record.resultConsumed
+        && !record.notificationDelivered,
+      )
+      .sort((a, b) => (a.completedAt ?? a.startedAt) - (b.completedAt ?? b.startedAt));
+
+    if (pending.length === 0) return;
+    if (pending.length === 1) {
+      sendIndividualNudge(pending[0]);
+    } else {
+      deliverGroupedCompletion(pending, false);
+    }
+  }
+
+  // ---- Group join manager ----
+  function createGroupJoinManager() {
+    return new GroupJoinManager(
+      (records, partial) => {
+        deliverGroupedCompletion(records, partial);
+      },
+      30_000,
+    );
+  }
+
+  let groupJoin = createGroupJoinManager();
 
   /** Helper: build event data for lifecycle events from an AgentRecord. */
   function buildEventData(record: AgentRecord) {
@@ -373,7 +455,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Background completion: route through group join or send individual nudge
-  const manager = new AgentManager((record) => {
+  manager = new AgentManager((record) => {
     // Emit lifecycle event based on terminal status
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
     const eventData = buildEventData(record);
@@ -389,6 +471,14 @@ export default function (pi: ExtensionAPI) {
       status: record.status, result: record.result, error: record.error,
       startedAt: record.startedAt, completedAt: record.completedAt,
     });
+
+    // Suppress UI/transcript delivery for agents that completed after /new or session switch.
+    if (!isCurrentSessionRecord(record)) {
+      agentActivity.delete(record.id);
+      manager.clearDetachedCompleted();
+      widget.update();
+      return;
+    }
 
     // Skip notification if result was already consumed via get_subagent_result
     if (record.resultConsumed) {
@@ -428,20 +518,69 @@ export default function (pi: ExtensionAPI) {
     waitForAll: () => manager.waitForAll(),
     hasRunning: () => manager.hasRunning(),
     spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
-      manager.spawn(piRef, ctx, type, prompt, options),
+      manager.spawn(piRef, ctx, type, prompt, {
+        ...options,
+        sessionId: options?.sessionId ?? ctx?.sessionManager?.getSessionId?.(),
+      }),
     getRecord: (id: string) => manager.getRecord(id),
   };
 
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
 
-  // Capture ctx from session_start for RPC spawn handler
-  pi.on("session_start", async (_event, ctx) => {
-    currentCtx = ctx;
-    manager.clearCompleted();           // preserve existing behavior
-  });
+  function resetPerSessionUIState(sessionId: string | undefined, ui?: UICtx) {
+    setCurrentSessionId(sessionId);
 
-  pi.on("session_switch", () => { manager.clearCompleted(); });
+    if (batchFinalizeTimer) {
+      clearTimeout(batchFinalizeTimer);
+      batchFinalizeTimer = undefined;
+    }
+    currentBatchAgents = [];
+    groupJoin.dispose();
+    groupJoin = createGroupJoinManager();
+
+    reportWidget.clear();
+    reportWidget.setUI(ui);
+    if (ui) {
+      widget.setUICtx(ui);
+    }
+    widget.update();
+  }
+
+  function hardResetBackgroundStateForSessionChange(_previousSessionId: string | undefined, nextSessionId: string | undefined, ui?: UICtx) {
+    resetPerSessionUIState(nextSessionId, ui);
+    manager.detachAllExcept(nextSessionId, true);
+    manager.abortAll();
+    manager.clearCompleted();
+    agentActivity.clear();
+  }
+
+  function softSwitchBackgroundStateForSessionChange(previousSessionId: string | undefined, nextSessionId: string | undefined, ui?: UICtx) {
+    if (previousSessionId && previousSessionId !== nextSessionId) {
+      manager.detachSession(previousSessionId, false);
+    }
+    manager.attachSession(nextSessionId);
+    resetPerSessionUIState(nextSessionId, ui);
+    deliverDeferredCurrentSessionCompletions();
+  }
+
+  // Reset fully for /new and startup; soft-switch for /resume; treat /fork as a new session boundary.
+  pi.on("session_start", (_event, ctx) => {
+    currentCtx = ctx;
+    hardResetBackgroundStateForSessionChange(currentSessionId, ctx.sessionManager.getSessionId(), ctx.ui as UICtx);
+  });
+  pi.on("session_switch", (event, ctx) => {
+    currentCtx = ctx;
+    if (event.reason === "resume") {
+      softSwitchBackgroundStateForSessionChange(currentSessionId, ctx.sessionManager.getSessionId(), ctx.ui as UICtx);
+    } else {
+      hardResetBackgroundStateForSessionChange(currentSessionId, ctx.sessionManager.getSessionId(), ctx.ui as UICtx);
+    }
+  });
+  pi.on("session_fork", (_event, ctx) => {
+    currentCtx = ctx;
+    hardResetBackgroundStateForSessionChange(currentSessionId, ctx.sessionManager.getSessionId(), ctx.ui as UICtx);
+  });
 
   const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc, unsubStop: unsubStopRpc } = registerRpcHandlers({
     events: pi.events,
@@ -461,6 +600,14 @@ export default function (pi: ExtensionAPI) {
     unsubPingRpc();
     currentCtx = undefined;
     delete (globalThis as any)[MANAGER_KEY];
+    if (batchFinalizeTimer) {
+      clearTimeout(batchFinalizeTimer);
+      batchFinalizeTimer = undefined;
+    }
+    currentBatchAgents = [];
+    groupJoin.dispose();
+    setCurrentSessionId(undefined);
+    reportWidget.dispose();
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
@@ -518,9 +665,18 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  // Re-register widgets when the per-turn UI context changes.
+  pi.on("agent_start", async (_event, ctx) => {
+    setCurrentSessionId(ctx.sessionManager.getSessionId());
+    widget.setUICtx(ctx.ui as UICtx);
+    reportWidget.setUI(ctx.ui);
+  });
+
   // Grab UI context from first tool execution + clear lingering widget on new turn
   pi.on("tool_execution_start", async (_event, ctx) => {
+    setCurrentSessionId(ctx.sessionManager.getSessionId());
     widget.setUICtx(ctx.ui as UICtx);
+    reportWidget.setUI(ctx.ui);
     widget.onTurnStart();
   });
 
@@ -834,6 +990,8 @@ Guidelines:
 
         id = manager.spawn(pi, ctx, subagentType, params.prompt, {
           description: params.description,
+          origin: "tool",
+          sessionId: ctx.sessionManager.getSessionId(),
           model,
           maxTurns: effectiveMaxTurns,
           isolated,
@@ -942,6 +1100,7 @@ Guidelines:
 
       const record = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
         description: params.description,
+        sessionId: ctx.sessionManager.getSessionId(),
         model,
         maxTurns: effectiveMaxTurns,
         isolated,
@@ -1517,6 +1676,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
 
     const record = await manager.spawnAndWait(pi, ctx, "general-purpose", generatePrompt, {
       description: `Generate ${name} agent`,
+      sessionId: ctx.sessionManager.getSessionId(),
       maxTurns: 5,
     });
 
@@ -1778,6 +1938,8 @@ ${systemPrompt}
 
       const id = manager.spawn(pi, ctx, "Review", request.prompt, {
         description: request.description,
+        origin: "command",
+        sessionId: ctx.sessionManager.getSessionId(),
         thinkingLevel: "high",
         isBackground: true,
         ...bgCallbacks,

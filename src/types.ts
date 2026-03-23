@@ -60,6 +60,20 @@ export interface AgentRecord {
   id: string;
   type: SubagentType;
   description: string;
+  /** Where the agent was launched from. */
+  origin?: "tool" | "command";
+  /** Session that launched the agent. Used to scope UI/reporting across /new and session switches. */
+  sessionId?: string;
+  /** True for background agents (used for concurrency accounting). */
+  isBackground?: boolean;
+  /** Set once the underlying run/resume promise has settled. */
+  promiseSettled?: boolean;
+  /** Prevent double-decrementing background concurrency when abort releases a slot early. */
+  backgroundSlotReleased?: boolean;
+  /** Hidden from public lookups/listing when the user switches away from its session. */
+  detached?: boolean;
+  /** Detached due to a hard reset (/new, /fork) and should be cleaned once safe. */
+  abandoned?: boolean;
   status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
   result?: string;
   error?: string;
@@ -71,6 +85,8 @@ export interface AgentRecord {
   promise?: Promise<string>;
   groupId?: string;
   joinMode?: JoinMode;
+  /** Set once the completion was surfaced to the session/user. */
+  notificationDelivered?: boolean;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
   resultConsumed?: boolean;
   /** Steering messages queued before the session was ready. */

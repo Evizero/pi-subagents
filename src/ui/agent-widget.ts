@@ -161,6 +161,7 @@ export function describeActivity(activeTools: Map<string, string>, responseText?
 
 export class AgentWidget {
   private uiCtx: UICtx | undefined;
+  private currentSessionId: string | undefined;
   private widgetFrame = 0;
   private widgetInterval: ReturnType<typeof setInterval> | undefined;
   /** Tracks how many turns each finished agent has survived. Key: agent ID, Value: turns since finished. */
@@ -189,6 +190,14 @@ export class AgentWidget {
       this.widgetRegistered = false;
       this.tui = undefined;
       this.lastStatusText = undefined;
+    }
+  }
+
+  /** Restrict rendered agents to the active session. */
+  setSessionId(sessionId: string | undefined) {
+    if (this.currentSessionId !== sessionId) {
+      this.currentSessionId = sessionId;
+      this.update();
     }
   }
 
@@ -268,7 +277,7 @@ export class AgentWidget {
    * reading live state each time instead of capturing it in a closure.
    */
   private renderWidget(tui: any, theme: Theme): string[] {
-    const allAgents = this.manager.listAgents();
+    const allAgents = this.manager.listAgents().filter(a => !this.currentSessionId || a.sessionId === this.currentSessionId);
     const running = allAgents.filter(a => a.status === "running");
     const queued = allAgents.filter(a => a.status === "queued");
     const finished = allAgents.filter(a =>
@@ -403,7 +412,7 @@ export class AgentWidget {
   /** Force an immediate widget update. */
   update() {
     if (!this.uiCtx) return;
-    const allAgents = this.manager.listAgents();
+    const allAgents = this.manager.listAgents().filter(a => !this.currentSessionId || a.sessionId === this.currentSessionId);
 
     // Lightweight existence checks — full categorization happens in renderWidget()
     let runningCount = 0;

@@ -29,6 +29,10 @@ interface SpawnArgs {
 
 interface SpawnOptions {
   description: string;
+  /** Origin of the launch request. */
+  origin?: "tool" | "command";
+  /** Session that launched the agent. */
+  sessionId?: string;
   model?: Model<any>;
   maxTurns?: number;
   isolated?: boolean;
@@ -95,6 +99,14 @@ export class AgentManager {
       id,
       type,
       description: options.description,
+      origin: options.origin,
+      sessionId: options.sessionId,
+      isBackground: options.isBackground,
+      promiseSettled: false,
+      backgroundSlotReleased: false,
+      detached: false,
+      abandoned: false,
+      notificationDelivered: false,
       status: options.isBackground ? "queued" : "running",
       toolUses: 0,
       startedAt: Date.now(),
@@ -172,6 +184,7 @@ export class AgentManager {
         record.result = responseText;
         record.session = session;
         record.completedAt ??= Date.now();
+        record.promiseSettled = true;
 
         // Final flush of streaming output file
         if (record.outputCleanup) {
@@ -190,7 +203,7 @@ export class AgentManager {
         }
 
         if (options.isBackground) {
-          this.runningBackground--;
+          if (!record.backgroundSlotReleased) this.runningBackground--;
           this.onComplete?.(record);
           this.drainQueue();
         }
@@ -203,6 +216,7 @@ export class AgentManager {
         }
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt ??= Date.now();
+        record.promiseSettled = true;
 
         // Final flush of streaming output file on error
         if (record.outputCleanup) {
@@ -219,7 +233,7 @@ export class AgentManager {
         }
 
         if (options.isBackground) {
-          this.runningBackground--;
+          if (!record.backgroundSlotReleased) this.runningBackground--;
           this.onComplete?.(record);
           this.drainQueue();
         }
@@ -272,6 +286,7 @@ export class AgentManager {
     record.completedAt = undefined;
     record.result = undefined;
     record.error = undefined;
+    record.notificationDelivered = false;
 
     try {
       const responseText = await resumeAgent(record.session, prompt, {
@@ -293,13 +308,15 @@ export class AgentManager {
   }
 
   getRecord(id: string): AgentRecord | undefined {
-    return this.agents.get(id);
+    const record = this.agents.get(id);
+    if (record?.detached) return undefined;
+    return record;
   }
 
   listAgents(): AgentRecord[] {
-    return [...this.agents.values()].sort(
-      (a, b) => b.startedAt - a.startedAt,
-    );
+    return [...this.agents.values()]
+      .filter((record) => !record.detached)
+      .sort((a, b) => b.startedAt - a.startedAt);
   }
 
   abort(id: string): boolean {
@@ -318,6 +335,11 @@ export class AgentManager {
     record.abortController?.abort();
     record.status = "stopped";
     record.completedAt = Date.now();
+    if (record.isBackground && !record.backgroundSlotReleased) {
+      record.backgroundSlotReleased = true;
+      this.runningBackground = Math.max(0, this.runningBackground - 1);
+      this.drainQueue();
+    }
     return true;
   }
 
@@ -328,11 +350,58 @@ export class AgentManager {
     this.agents.delete(id);
   }
 
+  /** Hide all records for a session from public lookups/listing while keeping them until safe cleanup. */
+  detachSession(sessionId: string | undefined, abandoned = false): void {
+    if (!sessionId) return;
+    for (const record of this.agents.values()) {
+      if (record.sessionId === sessionId) {
+        record.detached = true;
+        record.abandoned = abandoned;
+      }
+    }
+  }
+
+  /** Hide all records except those belonging to the given session. */
+  detachAllExcept(sessionId: string | undefined, abandoned = false): void {
+    for (const record of this.agents.values()) {
+      const keepVisible = sessionId !== undefined && record.sessionId === sessionId && !record.abandoned;
+      record.detached = !keepVisible;
+      if (!keepVisible) {
+        record.abandoned = abandoned;
+      } else {
+        record.abandoned = false;
+      }
+    }
+  }
+
+  /** Restore visibility for a previously-detached session (e.g. when /resume returns to it). */
+  attachSession(sessionId: string | undefined): void {
+    if (!sessionId) return;
+    for (const record of this.agents.values()) {
+      if (record.sessionId === sessionId && !record.abandoned) {
+        record.detached = false;
+      }
+    }
+  }
+
+  /** Remove only detached hard-reset records that are safe to dispose. */
+  clearDetachedCompleted(): void {
+    for (const [id, record] of this.agents) {
+      if (!record.detached || !record.abandoned) continue;
+      if (record.status === "running" || record.status === "queued") continue;
+      if (record.promise && !record.promiseSettled) continue;
+      this.removeRecord(id, record);
+    }
+  }
+
   private cleanup() {
     const cutoff = Date.now() - 10 * 60_000;
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
+      if (record.promise && !record.promiseSettled) continue;
+      // Preserve deferred soft-switch results until the user returns and they are surfaced.
+      if (record.detached && !record.abandoned && !record.notificationDelivered && !record.resultConsumed) continue;
       this.removeRecord(id, record);
     }
   }
@@ -344,6 +413,7 @@ export class AgentManager {
   clearCompleted(): void {
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
+      if (record.promise && !record.promiseSettled) continue;
       this.removeRecord(id, record);
     }
   }
@@ -364,6 +434,7 @@ export class AgentManager {
       if (record) {
         record.status = "stopped";
         record.completedAt = Date.now();
+        record.promiseSettled = true;
         count++;
       }
     }
@@ -374,9 +445,14 @@ export class AgentManager {
         record.abortController?.abort();
         record.status = "stopped";
         record.completedAt = Date.now();
+        if (record.isBackground && !record.backgroundSlotReleased) {
+          record.backgroundSlotReleased = true;
+          this.runningBackground = Math.max(0, this.runningBackground - 1);
+        }
         count++;
       }
     }
+    this.drainQueue();
     return count;
   }
 
