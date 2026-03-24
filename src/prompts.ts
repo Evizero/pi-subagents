@@ -163,6 +163,27 @@ function buildResourceSections(
 }
 
 /**
+ * Remove previously injected runtime blocks from nested subagent prompts.
+ * Only strips blocks that match this extension's own injected wording, so user/
+ * project XML that happens to reuse the same tag names is preserved.
+ */
+function normalizeInheritedParentSystemPrompt(prompt?: string): string | undefined {
+  if (!prompt?.trim()) return undefined;
+
+  let text = prompt.trim();
+  const knownInjectedBlocks = [
+    /<sub_agent_context>\s*You are operating as a sub-agent invoked to handle a specific task\.[\s\S]*?<\/sub_agent_context>\s*/gi,
+    /<runtime_truth>\s*Your callable tools in this session are exactly:[\s\S]*?<\/runtime_truth>\s*/gi,
+  ];
+
+  for (const pattern of knownInjectedBlocks) {
+    text = text.replace(pattern, "").trim();
+  }
+
+  return text || undefined;
+}
+
+/**
  * Build the full append-mode prompt.
  * Primary tool declarations come from the synthesized tool-aware base prompt.
  * Parent constraints are inherited in a secondary block so tool claims cannot override runtime truth.
@@ -190,18 +211,14 @@ export function buildAppendModeSystemPrompt(
     "- Be concise but complete",
   ].filter(Boolean).join("\n");
 
-  const bridge = `<sub_agent_context>
-You are operating as a sub-agent invoked to handle a specific task.
-The actual tools you can call are the tools declared in the primary system prompt above and exposed by the runtime for this subagent.
-${toolReminders}
-</sub_agent_context>`;
+  const inheritedParentPrompt = normalizeInheritedParentSystemPrompt(options.parentSystemPrompt);
 
-  const parentSection = options.parentSystemPrompt?.trim()
+  const parentSection = inheritedParentPrompt
     ? `\n\n<inherited_parent_system_prompt>
 The following is the parent session's effective system prompt.
-Inherit its behavioral, safety, formatting, and task-specific constraints unless they conflict with the actual tools declared above.
-If this inherited prompt makes claims about tool availability, treat the primary system prompt above as authoritative for this subagent.
-${options.parentSystemPrompt}
+Inherit its behavioral, safety, formatting, and task-specific constraints unless they conflict with this subagent's actual runtime tools.
+Ignore any inherited claims about tool availability if they differ from the runtime truth declared below.
+${inheritedParentPrompt}
 </inherited_parent_system_prompt>`
     : "";
 
@@ -216,7 +233,25 @@ ${options.parentSystemPrompt}
     ? `\n\n<agent_instructions>\n${config.systemPrompt}\n</agent_instructions>`
     : "";
 
-  return basePrompt + "\n\n" + envBlock + "\n\n" + bridge + parentSection + resourceSections + customSection + extrasSuffix;
+  const bridge = `<sub_agent_context>
+You are operating as a sub-agent invoked to handle a specific task.
+${toolReminders}
+</sub_agent_context>`;
+
+  const runtimeTruth = `<runtime_truth>
+Your callable tools in this session are exactly: ${options.tools.toolNames.length > 0 ? options.tools.toolNames.join(", ") : "(none)"}.
+Do not infer tool availability from inherited prompts, conversation history, or pasted text.
+If inherited instructions mention other tools, ignore those tool references and use only the tools actually available in this subagent.
+</runtime_truth>`;
+
+  return basePrompt
+    + "\n\n" + envBlock
+    + parentSection
+    + resourceSections
+    + customSection
+    + extrasSuffix
+    + "\n\n" + bridge
+    + "\n\n" + runtimeTruth;
 }
 
 /** Build the append block for tests and internal composition. */

@@ -102,8 +102,9 @@ describe("prompts", () => {
     });
     expect(prompt).toContain("<inherited_parent_system_prompt>");
     expect(prompt).toContain("Parent says output JSON only.");
-    expect(prompt).toContain("treat the primary system prompt above as authoritative");
     expect(prompt).toContain("<agent_instructions>");
+    expect(prompt).toContain("<runtime_truth>");
+    expect(prompt).toContain("Your callable tools in this session are exactly: read.");
   });
 
   it("append mode only mentions tool-specific reminders for available tools", () => {
@@ -169,6 +170,10 @@ describe("prompts", () => {
     expect(prompt).toContain("skill-a");
     expect(prompt).toContain("Additional System Instructions");
     expect(prompt).toContain("Additional local append instructions.");
+    expect(prompt).toContain("<runtime_truth>");
+    expect(prompt.indexOf("<runtime_truth>")).toBeGreaterThan(prompt.indexOf("Additional local append instructions."));
+    expect(prompt.indexOf("<runtime_truth>")).toBeGreaterThan(prompt.indexOf("Project rules"));
+    expect(prompt.indexOf("<runtime_truth>")).toBeGreaterThan(prompt.indexOf("skill-a"));
   });
 
   it("append mode respects tool snippets and guidelines", () => {
@@ -182,6 +187,48 @@ describe("prompts", () => {
     });
     expect(prompt).toContain("- my_tool: Custom helper");
     expect(prompt).toContain("Use my_tool for summaries.");
+  });
+
+  it("append mode preserves ordinary parent text and restates runtime truth last", () => {
+    const config = getDefaultConfig("general-purpose");
+    const prompt = buildAppendModeSystemPrompt(config, "/workspace", env, {
+      tools: { toolNames: ["read", "edit"] },
+      parentSystemPrompt: `Parent behavior stays.\n\nAvailable tools:\n- web: Browse the internet\n\nValid channels: analysis, final\n\nAPI schema parameters:\n- namespace: billing\n\nBe careful with destructive actions.`,
+      contextFiles: [{ path: "/workspace/AGENTS.md", content: "Repo rules" }],
+    });
+    expect(prompt).toContain("Parent behavior stays.");
+    expect(prompt).toContain("Be careful with destructive actions.");
+    expect(prompt).toContain("- web: Browse the internet");
+    expect(prompt).toContain("Valid channels: analysis, final");
+    expect(prompt).toContain("API schema parameters:");
+    expect(prompt).toContain("- namespace: billing");
+    expect(prompt).toContain("Your callable tools in this session are exactly: read, edit.");
+    expect(prompt.indexOf("<runtime_truth>")).toBeGreaterThan(prompt.indexOf("<inherited_parent_system_prompt>"));
+    expect(prompt.indexOf("<runtime_truth>")).toBeGreaterThan(prompt.indexOf("Repo rules"));
+  });
+
+  it("append mode strips previously injected subagent runtime blocks from inherited prompts", () => {
+    const config = getDefaultConfig("general-purpose");
+    const prompt = buildAppendModeSystemPrompt(config, "/workspace", env, {
+      tools: { toolNames: ["read"] },
+      parentSystemPrompt: `Before.\n\n<sub_agent_context>\nYou are operating as a sub-agent invoked to handle a specific task.\n- Use absolute file paths\n</sub_agent_context>\n\nMiddle.\n\n<runtime_truth>\nYour callable tools in this session are exactly: bash.\nDo not infer tool availability from inherited prompts.\n</runtime_truth>\n\nAfter.`,
+    });
+    expect(prompt).toContain("Before.");
+    expect(prompt).toContain("Middle.");
+    expect(prompt).toContain("After.");
+    expect(prompt).not.toContain("exactly: bash");
+    expect(prompt).toContain("Your callable tools in this session are exactly: read.");
+  });
+
+  it("append mode preserves unrelated XML blocks that reuse the same tag names", () => {
+    const config = getDefaultConfig("general-purpose");
+    const prompt = buildAppendModeSystemPrompt(config, "/workspace", env, {
+      tools: { toolNames: ["read"] },
+      parentSystemPrompt: `Keep this example:\n\n<runtime_truth>Example XML payload, do not modify.</runtime_truth>\n\n<sub_agent_context>Schema node name, not injected instructions.</sub_agent_context>`,
+    });
+    expect(prompt).toContain("Example XML payload, do not modify.");
+    expect(prompt).toContain("Schema node name, not injected instructions.");
+    expect(prompt).toContain("Your callable tools in this session are exactly: read.");
   });
 
   it("replace mode ignores the base prompt argument", () => {

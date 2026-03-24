@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Append-mode tool prompt contamination** — append-mode subagents now synthesize the full inherited prompt stack in one place so runtime truth is restated after inherited prompt content, APPEND_SYSTEM content, project context, and skill listings. Previously injected subagent runtime blocks are removed only when they match this extension's own injected phrasing, avoiding broad heuristics that could delete ordinary parent/project instructions.
+- **Append-mode reload/runtime drift** — append-mode tool metadata is now recomputed from the current loader state, so `Available tools:` and `<runtime_truth>` stay aligned after `/reload` changes extension tools.
+- **Append-mode skill regression** — runtime skill discovery remains available for explicit `/skill:name` expansion and command listing, while duplicate skill prompt injection after the synthesized prompt is still suppressed.
+
 ## [0.5.2] - 2026-03-26
 
 ### Fixed

@@ -18,7 +18,7 @@ import { getAgentConfig, getConfig, getMemoryTools, getReadOnlyMemoryTools, getT
 import { buildParentContext, extractText } from "./context.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
-import { buildAgentPrompt, buildAppendModeSystemPrompt, type PromptExtras } from "./prompts.js";
+import { buildAgentPrompt, buildAppendModeSystemPrompt, type PromptExtras, type ToolPromptInfo } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
 
@@ -152,6 +152,66 @@ function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => 
   return () => signal.removeEventListener("abort", onAbort);
 }
 
+/**
+ * Build current tool metadata for append-mode prompts.
+ * Recomputes extension tools/snippets/guidelines from the loader so prompt text stays
+ * aligned with the session runtime after reloads.
+ */
+export function collectAppendModeToolInfo(
+  baseToolNames: string[],
+  loader: ResourceLoader,
+  options: { extensions: true | string[] | false; disallowedSet?: Set<string> },
+): ToolPromptInfo {
+  const toolNames = [...baseToolNames];
+  const toolSnippets: Record<string, string> = {};
+  const promptGuidelines: string[] = [];
+
+  for (const extension of loader.getExtensions().extensions) {
+    for (const [toolName, registeredTool] of extension.tools) {
+      if (EXCLUDED_TOOL_NAMES.includes(toolName)) continue;
+      if (options.disallowedSet?.has(toolName)) continue;
+      if (Array.isArray(options.extensions)
+        && !options.extensions.some(ext => toolName.startsWith(ext) || toolName.includes(ext))) {
+        continue;
+      }
+      if (!toolNames.includes(toolName)) toolNames.push(toolName);
+      toolSnippets[toolName] = registeredTool.definition.promptSnippet ?? registeredTool.definition.description;
+      if (registeredTool.definition.promptGuidelines?.length) {
+        promptGuidelines.push(...registeredTool.definition.promptGuidelines);
+      }
+    }
+  }
+
+  return { toolNames, toolSnippets, promptGuidelines };
+}
+
+/**
+ * Wrap a loader for append-mode agents.
+ * Keeps runtime access to discovered skills and skill-command expansion while
+ * preventing the base loader from appending skills/context/APPEND_SYSTEM after
+ * the synthesized prompt.
+ */
+export function createAppendModeResourceLoader(
+  baseLoader: ResourceLoader,
+  buildSynthesizedPrompt: () => string,
+): ResourceLoader {
+  return {
+    getExtensions: () => baseLoader.getExtensions(),
+    getSkills: () => ({
+      skills: baseLoader.getSkills().skills.map(skill => ({ ...skill, disableModelInvocation: true })),
+      diagnostics: baseLoader.getSkills().diagnostics,
+    }),
+    getPrompts: () => baseLoader.getPrompts(),
+    getThemes: () => baseLoader.getThemes(),
+    getAgentsFiles: () => ({ agentsFiles: [] }),
+    getSystemPrompt: () => buildSynthesizedPrompt(),
+    getAppendSystemPrompt: () => [],
+    getPathMetadata: () => baseLoader.getPathMetadata(),
+    extendResources: (paths) => baseLoader.extendResources(paths),
+    reload: async () => { await baseLoader.reload(); },
+  };
+}
+
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
@@ -241,51 +301,25 @@ export async function runAgent(
   await loader.reload();
 
   if (promptConfig.promptMode === "append") {
-    const toolNames = tools
+    const baseToolNames = tools
       .map(t => t.name)
       .filter(name => !disallowedSet?.has(name));
-    const toolSnippets: Record<string, string> = {};
-    const promptGuidelines: string[] = [];
 
-    for (const extension of loader.getExtensions().extensions) {
-      for (const [toolName, registeredTool] of extension.tools) {
-        if (EXCLUDED_TOOL_NAMES.includes(toolName)) continue;
-        if (disallowedSet?.has(toolName)) continue;
-        if (Array.isArray(extensions) && !extensions.some(ext => toolName.startsWith(ext) || toolName.includes(ext))) {
-          continue;
-        }
-        if (!toolNames.includes(toolName)) toolNames.push(toolName);
-        toolSnippets[toolName] = registeredTool.definition.promptSnippet ?? registeredTool.definition.description;
-        if (registeredTool.definition.promptGuidelines?.length) {
-          promptGuidelines.push(...registeredTool.definition.promptGuidelines);
-        }
-      }
-    }
-
-    const synthesizedPrompt = buildAppendModeSystemPrompt(promptConfig, effectiveCwd, env, {
-      tools: { toolNames, toolSnippets, promptGuidelines },
+    const baseLoader = loader;
+    const buildSynthesizedPrompt = () => buildAppendModeSystemPrompt(promptConfig, effectiveCwd, env, {
+      tools: collectAppendModeToolInfo(baseToolNames, baseLoader, { extensions, disallowedSet }),
       parentSystemPrompt,
+      contextFiles: baseLoader.getAgentsFiles().agentsFiles,
+      loadedSkills: baseLoader.getSkills().skills,
+      appendSystemPrompts: baseLoader.getAppendSystemPrompt(),
       extras,
     });
 
-    // Reuse the already-loaded resources and extensions. The synthesized prompt provides
-    // the primary tool-aware prompt and inherited parent constraints, while the loader's
-    // own project context / skills / APPEND_SYSTEM remain available to pi for normal
-    // prompt assembly and /skill discovery in the effective cwd.
-    const baseLoader = loader;
-    const wrappedLoader: ResourceLoader = {
-      getExtensions: () => baseLoader.getExtensions(),
-      getSkills: () => baseLoader.getSkills(),
-      getPrompts: () => baseLoader.getPrompts(),
-      getThemes: () => baseLoader.getThemes(),
-      getAgentsFiles: () => baseLoader.getAgentsFiles(),
-      getSystemPrompt: () => synthesizedPrompt,
-      getAppendSystemPrompt: () => baseLoader.getAppendSystemPrompt(),
-      getPathMetadata: () => baseLoader.getPathMetadata(),
-      extendResources: (paths) => baseLoader.extendResources(paths),
-      reload: async () => {},
-    };
-    loader = wrappedLoader;
+    // Compose the full append-mode prompt ourselves so inherited parent instructions,
+    // project context, skills, and APPEND_SYSTEM are all ordered before runtime truth.
+    // Then suppress the loader-provided prompt sections to avoid duplicating them after
+    // the synthesized runtime-truth block.
+    loader = createAppendModeResourceLoader(baseLoader, buildSynthesizedPrompt);
   } else {
     loader = new DefaultResourceLoader({
       cwd: effectiveCwd,

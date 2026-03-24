@@ -8,6 +8,15 @@ vi.mock("@mariozechner/pi-coding-agent", () => ({
   createAgentSession,
   DefaultResourceLoader: class {
     async reload() {}
+    getExtensions() { return { extensions: [], runtime: {} }; }
+    getSkills() { return { skills: [], diagnostics: [] }; }
+    getPrompts() { return { prompts: [], diagnostics: [] }; }
+    getThemes() { return { themes: [], diagnostics: [] }; }
+    getAgentsFiles() { return { agentsFiles: [] }; }
+    getSystemPrompt() { return "base prompt"; }
+    getAppendSystemPrompt() { return []; }
+    getPathMetadata() { return new Map(); }
+    extendResources() {}
   },
   SessionManager: { inMemory: vi.fn(() => ({ kind: "memory-session-manager" })) },
   SettingsManager: { create: vi.fn(() => ({ kind: "settings-manager" })) },
@@ -45,6 +54,7 @@ vi.mock("../src/env.js", () => ({
 
 vi.mock("../src/prompts.js", () => ({
   buildAgentPrompt: vi.fn(() => "system prompt"),
+  buildAppendModeSystemPrompt: vi.fn(() => "append prompt"),
 }));
 
 vi.mock("../src/memory.js", () => ({
@@ -56,7 +66,12 @@ vi.mock("../src/skill-loader.js", () => ({
   preloadSkills: vi.fn(() => []),
 }));
 
-import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import {
+  collectAppendModeToolInfo,
+  createAppendModeResourceLoader,
+  resumeAgent,
+  runAgent,
+} from "../src/agent-runner.js";
 
 function createSession(finalText: string) {
   const listeners: Array<(event: any) => void> = [];
@@ -127,5 +142,71 @@ describe("agent-runner final output capture", () => {
     const result = await resumeAgent(session as any, "Continue");
 
     expect(result).toBe("RESUMED");
+  });
+});
+
+describe("agent-runner append-mode loader", () => {
+  it("recomputes extension tool metadata from the loader", () => {
+    let tools = new Map<string, any>([
+      ["ext_a", { definition: { description: "Tool A", promptGuidelines: ["Use ext_a carefully."] } }],
+    ]);
+    const loader: any = {
+      getExtensions: () => ({ extensions: [{ tools }], runtime: {} }),
+    };
+
+    expect(collectAppendModeToolInfo(["read"], loader, { extensions: true })).toEqual({
+      toolNames: ["read", "ext_a"],
+      toolSnippets: { ext_a: "Tool A" },
+      promptGuidelines: ["Use ext_a carefully."],
+    });
+
+    tools = new Map<string, any>([
+      ["ext_b", { definition: { description: "Tool B" } }],
+    ]);
+
+    expect(collectAppendModeToolInfo(["read"], loader, { extensions: true })).toEqual({
+      toolNames: ["read", "ext_b"],
+      toolSnippets: { ext_b: "Tool B" },
+      promptGuidelines: [],
+    });
+  });
+
+  it("preserves runtime skill discovery while hiding duplicated prompt injection", async () => {
+    const baseLoader: any = {
+      getExtensions: () => ({ extensions: [], runtime: {} }),
+      getSkills: () => ({
+        skills: [{
+          name: "skill-a",
+          description: "Do the thing.",
+          filePath: "/tmp/skill-a/SKILL.md",
+          baseDir: "/tmp/skill-a",
+          source: "project",
+          disableModelInvocation: false,
+        }],
+        diagnostics: [{ level: "info", message: "ok" }],
+      }),
+      getPrompts: () => ({ prompts: [], diagnostics: [] }),
+      getThemes: () => ({ themes: [], diagnostics: [] }),
+      getAgentsFiles: () => ({ agentsFiles: [{ path: "/tmp/AGENTS.md", content: "rules" }] }),
+      getSystemPrompt: () => "base prompt",
+      getAppendSystemPrompt: () => ["append rules"],
+      getPathMetadata: () => new Map(),
+      extendResources: () => {},
+      reload: async () => {},
+    };
+
+    const loader = createAppendModeResourceLoader(baseLoader, () => "synthesized prompt");
+
+    expect(loader.getSystemPrompt()).toBe("synthesized prompt");
+    expect(loader.getAppendSystemPrompt()).toEqual([]);
+    expect(loader.getAgentsFiles().agentsFiles).toEqual([]);
+
+    const skills = loader.getSkills();
+    expect(skills.skills).toHaveLength(1);
+    expect(skills.skills[0].name).toBe("skill-a");
+    expect(skills.skills[0].disableModelInvocation).toBe(true);
+    expect(skills.diagnostics).toEqual([{ level: "info", message: "ok" }]);
+
+    await expect(loader.reload()).resolves.toBeUndefined();
   });
 });

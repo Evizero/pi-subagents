@@ -105,7 +105,7 @@ Group completions render each agent as a separate block. The LLM receives struct
 | `Explore` | read, bash, grep, find, ls | haiku (falls back to inherit) | `replace` (standalone) | Fast codebase exploration (read-only) |
 | `Review` | read, bash, grep, find, ls | `gpt-5.4` (falls back to inherit) | `replace` (standalone) | Code review specialist for diffs, branches, and commits (read-only) |
 
-The `general-purpose` agent uses **append mode** — it keeps its own tool-aware base prompt and appends the sub-agent context bridge on top. This avoids stale parent tool declarations while still preserving normal pi project conventions through the subagent's own resource loading. Explore and Review use standalone prompts tailored to their read-only roles.
+The `general-purpose` agent uses **append mode** — it keeps its own tool-aware base prompt and appends the sub-agent context bridge on top. Parent behavioral constraints can still be inherited, but the subagent's actual callable tools are restated after inherited prompt content, APPEND_SYSTEM content, project context, and skill listings so runtime truth wins at the end of the assembled prompt. Previously injected subagent runtime blocks are removed when nesting, and explicit skill commands continue to work without re-injecting duplicate skill listings after the synthesized prompt. Explore and Review use standalone prompts tailored to their read-only roles.
 
 Default agents can be **ejected** (`/agents` → select agent → Eject) to export them as `.md` files for customization, **overridden** by creating a `.md` file with the same name (e.g. `.pi/agents/general-purpose.md`), or **disabled** per-project with `enabled: false` frontmatter.
 
