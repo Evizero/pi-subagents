@@ -118,17 +118,32 @@ function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** Truncate long background-agent previews by line count instead of raw characters. */
-function truncatePreview(text: string, maxLines = 500, includeGetResultHint = true): string {
-  const lines = text.split("\n");
-  if (lines.length <= maxLines) return text;
-  const shownLines = Math.min(maxLines, lines.length);
-  const remainingLines = lines.length - shownLines;
-  const hint = includeGetResultHint
-    ? " Use get_subagent_result for full output."
-    : "";
-  return lines.slice(0, maxLines).join("\n") +
-    `\n... (${remainingLines} more lines truncated, ${lines.length} total,${hint})`;
+/** Truncate long previews by character count first, then by line count. */
+function truncatePreview(text: string, maxLines = 500, includeGetResultHint = true, maxChars = 6_000): string {
+  const originalLength = text.length;
+  let preview = text;
+  let truncatedChars = 0;
+
+  if (preview.length > maxChars) {
+    truncatedChars = preview.length - maxChars;
+    preview = preview.slice(0, maxChars);
+  }
+
+  const lines = preview.split("\n");
+  const truncatedLines = lines.length > maxLines ? lines.length - maxLines : 0;
+  if (truncatedLines > 0) {
+    preview = lines.slice(0, maxLines).join("\n");
+  }
+
+  if (truncatedChars === 0 && truncatedLines === 0) return text;
+
+  const notes: string[] = [];
+  if (truncatedLines > 0) notes.push(`${truncatedLines} more lines truncated`);
+  if (truncatedChars > 0) notes.push(`${truncatedChars} more characters truncated`);
+  if (truncatedLines === 0 && originalLength > maxChars) notes.push(`${lines.length} line${lines.length === 1 ? "" : "s"} shown`);
+
+  const hint = includeGetResultHint ? " Use get_subagent_result for full output." : "";
+  return `${preview}\n... (${notes.join(", ")}.${hint})`;
 }
 
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
@@ -282,22 +297,49 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function showToolLaunchedReportBlock(record: AgentRecord) {
-    if (record.origin !== "tool") return;
-    if (!isCurrentSessionRecord(record)) return;
-
+  function buildAgentReport(record: AgentRecord) {
     const displayName = getDisplayName(record.type);
     const duration = formatDuration(record.startedAt, record.completedAt);
     const status = getStatusLabel(record.status, record.error);
     const tokens = safeFormatTokens(record.session);
     const toolStats = tokens ? `Tools: ${record.toolUses} | ${tokens}` : `Tools: ${record.toolUses}`;
 
-    reportWidget.show({
-      id: record.id,
-      sessionId: record.sessionId,
+    return {
       title: `${displayName} (${record.description})`,
       meta: `status: ${status} · ${toolStats} · ${duration} · id: ${record.id}`,
       text: record.result ?? record.error ?? "No output.",
+    };
+  }
+
+  function buildSingleCompletionMessage(record: AgentRecord, titlePrefix: string, includeGetResultHint = true) {
+    const displayName = getDisplayName(record.type);
+    const duration = formatDuration(record.startedAt, record.completedAt);
+    const status = getStatusLabel(record.status, record.error);
+    const tokens = safeFormatTokens(record.session);
+    const toolStats = tokens ? `Tool uses: ${record.toolUses} | ${tokens}` : `Tool uses: ${record.toolUses}`;
+    const body = record.result ?? record.error ?? "No output.";
+    const title = `${titlePrefix}: ${displayName} (${record.description})`;
+    const meta = `Agent ID: ${record.id} | Status: ${status} | ${toolStats} | Duration: ${duration}`;
+    const preview = truncatePreview(body, 500, includeGetResultHint);
+
+    return {
+      title,
+      meta,
+      preview,
+    };
+  }
+
+  function showToolLaunchedReportBlock(record: AgentRecord) {
+    if (record.origin !== "tool") return;
+    if (!isCurrentSessionRecord(record)) return;
+
+    const report = buildAgentReport(record);
+    reportWidget.show({
+      id: record.id,
+      sessionId: record.sessionId,
+      title: report.title,
+      meta: report.meta,
+      text: report.text,
     });
   }
 
@@ -306,7 +348,6 @@ export default function (pi: ExtensionAPI) {
   // before they reach pi.sendMessage (fire-and-forget).
   const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
   const NUDGE_HOLD_MS = 200;
-
 
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
     cancelNudge(key);
@@ -844,11 +885,11 @@ Guidelines:
         const isSteered = details.status === "steered";
         const icon = isSteered ? theme.fg("warning", "✓") : theme.fg("success", "✓");
         const s = stats(details);
+        const resultText = result.content[0]?.type === "text" ? result.content[0].text : "";
         let line = icon + (s ? " " + s : "");
         line += " " + theme.fg("dim", "·") + " " + theme.fg("dim", duration);
 
         if (expanded) {
-          const resultText = result.content[0]?.type === "text" ? result.content[0].text : "";
           if (resultText) {
             const lines = resultText.split("\n").slice(0, 50);
             for (const l of lines) {
@@ -861,6 +902,13 @@ Guidelines:
         } else {
           const doneText = isSteered ? "Wrapped up (turn limit)" : "Done";
           line += "\n" + theme.fg("dim", `  ⎿  ${doneText}`);
+
+          const preview = resultText ? truncatePreview(resultText, 6, false, 1_200) : "";
+          if (preview) {
+            for (const previewLine of preview.split("\n")) {
+              line += "\n" + theme.fg("dim", `  ${previewLine}`);
+            }
+          }
         }
         return new Text(line, 0, 0);
       }
