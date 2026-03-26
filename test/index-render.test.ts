@@ -62,7 +62,7 @@ afterEach(async () => {
 });
 
 describe("Agent tool rendering", () => {
-  it("shows a bounded preview for completed collapsed results", async () => {
+  it("does not aggressively truncate short completed collapsed results", async () => {
     const registered = createMockPi();
     cleanups.push(registered.shutdown);
 
@@ -82,16 +82,39 @@ describe("Agent tool rendering", () => {
     const lines = renderLines(registered.renderResult, result, false);
     expect(lines.some((line: string) => line.includes("Done"))).toBe(true);
     expect(lines.some((line: string) => line.includes("line 1"))).toBe(true);
-    expect(lines.some((line: string) => line.includes("line 6"))).toBe(true);
-    expect(lines.some((line: string) => line.includes("more lines truncated"))).toBe(true);
-    expect(lines.some((line: string) => line.includes("line 7"))).toBe(false);
+    expect(lines.some((line: string) => line.includes("line 7"))).toBe(true);
+    expect(lines.some((line: string) => line.includes("more lines truncated"))).toBe(false);
+  });
+
+  it("keeps collapsed completed output compact", async () => {
+    const registered = createMockPi();
+    cleanups.push(registered.shutdown);
+
+    const longText = Array.from({ length: 31 }, (_value, index) => `line ${index + 1}`).join("\n");
+    const result = {
+      content: [{ type: "text", text: longText }],
+      details: {
+        displayName: "Review",
+        description: "Review current changes",
+        subagentType: "Review",
+        toolUses: 3,
+        tokens: "12.0k token",
+        durationMs: 2500,
+        status: "completed",
+      },
+    };
+
+    const lines = renderLines(registered.renderResult, result, false);
+    expect(lines.some((line: string) => line.includes("line 30"))).toBe(true);
+    expect(lines.some((line: string) => line.includes("line 31"))).toBe(false);
+    expect(lines.some((line: string) => line.includes("1 more lines truncated"))).toBe(true);
   });
 
   it("truncates long single-line completed output in collapsed view", async () => {
     const registered = createMockPi();
     cleanups.push(registered.shutdown);
 
-    const longLine = "A".repeat(2000);
+    const longLine = "A".repeat(70_000);
     const result = {
       content: [{ type: "text", text: longLine }],
       details: {
@@ -110,16 +133,21 @@ describe("Agent tool rendering", () => {
 
     expect(flattened).toContain("Done");
     expect(flattened).toContain("more characters truncated");
+    expect(flattened).toContain("1 line shown");
     expect(flattened).not.toContain(longLine);
-    expect(flattened.length).toBeLessThan(1700);
+    expect(flattened.length).toBeLessThan(2_000);
   });
 
-  it("shows full completed output when expanded", async () => {
+  it("shows long expanded output without the collapsed 6k cap", async () => {
     const registered = createMockPi();
     cleanups.push(registered.shutdown);
 
+    const expandedText = Array.from(
+      { length: 60 },
+      (_value, index) => `${"A".repeat(180)} line ${index + 1}`,
+    ).join("\n");
     const result = {
-      content: [{ type: "text", text: "alpha\nbeta\ngamma" }],
+      content: [{ type: "text", text: expandedText }],
       details: {
         displayName: "Review",
         description: "Review current changes",
@@ -134,9 +162,11 @@ describe("Agent tool rendering", () => {
     const lines = renderLines(registered.renderResult, result, true);
     const flattened = lines.join("\n");
 
-    expect(flattened).toContain("alpha");
-    expect(flattened).toContain("beta");
-    expect(flattened).toContain("gamma");
+    expect(flattened).toContain("line 1");
+    expect(flattened).toContain("line 30");
+    expect(flattened).toContain("line 60");
+    expect(flattened).not.toContain("more characters truncated");
+    expect(flattened).not.toContain("more lines truncated");
     expect(flattened).not.toContain("⎿  Done");
   });
 });

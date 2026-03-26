@@ -118,10 +118,32 @@ function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** Truncate long previews by character count first, then by line count. */
+const COLLAPSED_TOOL_RESULT_PREVIEW_MAX_LINES = 30;
+const COLLAPSED_TOOL_RESULT_PREVIEW_MAX_CHARS = 1_200;
+const EXPANDED_TOOL_RESULT_PREVIEW_MAX_LINES = 500;
+const EXPANDED_TOOL_RESULT_PREVIEW_MAX_CHARS = 60_000;
+
+/** Truncate long previews without scanning the full result unless the bounded preview already includes it. */
 function truncatePreview(text: string, maxLines = 500, includeGetResultHint = true, maxChars = 6_000): string {
-  const originalLength = text.length;
-  let preview = text;
+  let linesSeen = 1;
+  let searchFrom = 0;
+  let previewEnd = text.length;
+  let hasAdditionalLines = false;
+
+  while (linesSeen <= maxLines) {
+    const newlineIndex = text.indexOf("\n", searchFrom);
+    if (newlineIndex === -1) break;
+    searchFrom = newlineIndex + 1;
+    linesSeen++;
+  }
+
+  if (linesSeen > maxLines) {
+    hasAdditionalLines = true;
+    previewEnd = searchFrom - 1;
+  }
+
+  const previewCandidate = text.slice(0, previewEnd);
+  let preview = previewCandidate;
   let truncatedChars = 0;
 
   if (preview.length > maxChars) {
@@ -129,18 +151,22 @@ function truncatePreview(text: string, maxLines = 500, includeGetResultHint = tr
     preview = preview.slice(0, maxChars);
   }
 
-  const lines = preview.split("\n");
-  const truncatedLines = lines.length > maxLines ? lines.length - maxLines : 0;
-  if (truncatedLines > 0) {
-    preview = lines.slice(0, maxLines).join("\n");
-  }
+  if (!hasAdditionalLines && truncatedChars === 0) return text;
 
-  if (truncatedChars === 0 && truncatedLines === 0) return text;
-
+  const visibleLines = preview.split("\n").length;
   const notes: string[] = [];
-  if (truncatedLines > 0) notes.push(`${truncatedLines} more lines truncated`);
+  if (hasAdditionalLines) {
+    if (text.length <= maxChars) {
+      const totalLines = text.split("\n").length;
+      notes.push(`${totalLines - maxLines} more lines truncated`);
+    } else {
+      notes.push("more lines truncated");
+    }
+  }
   if (truncatedChars > 0) notes.push(`${truncatedChars} more characters truncated`);
-  if (truncatedLines === 0 && originalLength > maxChars) notes.push(`${lines.length} line${lines.length === 1 ? "" : "s"} shown`);
+  if (!hasAdditionalLines && truncatedChars > 0) {
+    notes.push(`${visibleLines} line${visibleLines === 1 ? "" : "s"} shown`);
+  }
 
   const hint = includeGetResultHint ? " Use get_subagent_result for full output." : "";
   return `${preview}\n... (${notes.join(", ")}.${hint})`;
@@ -891,19 +917,28 @@ Guidelines:
 
         if (expanded) {
           if (resultText) {
-            const lines = resultText.split("\n").slice(0, 50);
-            for (const l of lines) {
-              line += "\n" + theme.fg("dim", `  ${l}`);
-            }
-            if (resultText.split("\n").length > 50) {
-              line += "\n" + theme.fg("muted", "  ... (use get_subagent_result with verbose for full output)");
+            const preview = truncatePreview(
+              resultText,
+              EXPANDED_TOOL_RESULT_PREVIEW_MAX_LINES,
+              false,
+              EXPANDED_TOOL_RESULT_PREVIEW_MAX_CHARS,
+            );
+            for (const previewLine of preview.split("\n")) {
+              line += "\n" + theme.fg("dim", `  ${previewLine}`);
             }
           }
         } else {
           const doneText = isSteered ? "Wrapped up (turn limit)" : "Done";
           line += "\n" + theme.fg("dim", `  ⎿  ${doneText}`);
 
-          const preview = resultText ? truncatePreview(resultText, 6, false, 1_200) : "";
+          const preview = resultText
+            ? truncatePreview(
+              resultText,
+              COLLAPSED_TOOL_RESULT_PREVIEW_MAX_LINES,
+              false,
+              COLLAPSED_TOOL_RESULT_PREVIEW_MAX_CHARS,
+            )
+            : "";
           if (preview) {
             for (const previewLine of preview.split("\n")) {
               line += "\n" + theme.fg("dim", `  ${previewLine}`);
