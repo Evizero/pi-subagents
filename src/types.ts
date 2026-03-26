@@ -70,6 +70,8 @@ export interface AgentRecord {
   promiseSettled?: boolean;
   /** Prevent double-decrementing background concurrency when abort releases a slot early. */
   backgroundSlotReleased?: boolean;
+  /** Abort was requested but the underlying run has not fully unwound yet. */
+  stopRequested?: boolean;
   /** Hidden from public lookups/listing when the user switches away from its session. */
   detached?: boolean;
   /** Detached due to a hard reset (/new, /fork) and should be cleaned once safe. */

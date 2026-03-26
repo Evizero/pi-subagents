@@ -111,6 +111,104 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
 
     expect(onCompleteCalled).toBe(false);
   });
+
+  it("forwards abort signals to foreground agents", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options: any) =>
+      new Promise((resolve) => {
+        options.signal.addEventListener("abort", () => {
+          resolve({
+            responseText: "",
+            session: mockSession(),
+            aborted: false,
+            steered: false,
+          });
+        }, { once: true });
+      }),
+    );
+
+    const controller = new AbortController();
+    const promise = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    }, controller.signal);
+
+    controller.abort();
+    const record = await promise;
+
+    expect(record.status).toBe("stopped");
+    expect(record.completedAt).toBeDefined();
+  });
+
+  it("does not start a foreground agent when the caller signal is already aborted", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockReset();
+    const controller = new AbortController();
+    controller.abort();
+
+    const record = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    }, controller.signal);
+
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(record.status).toBe("stopped");
+    expect(manager.listAgents()).toHaveLength(0);
+  });
+
+  it("keeps running agents visible until cancellation actually settles", async () => {
+    manager = new AgentManager();
+    let resolveRun!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise((resolve) => {
+      resolveRun = resolve;
+    }));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+
+    expect(manager.abort(id)).toBe(true);
+    expect(record.status).toBe("running");
+    expect(record.stopRequested).toBe(true);
+    expect(record.completedAt).toBeUndefined();
+
+    resolveRun({
+      responseText: "",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    await record.promise;
+
+    expect(record.status).toBe("stopped");
+    expect(record.completedAt).toBeDefined();
+  });
+
+  it("treats queued background aborts as terminal completions", async () => {
+    let completedRecord: AgentRecord | undefined;
+    manager = new AgentManager((r) => {
+      completedRecord = r;
+    }, 1);
+
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const runningId = manager.spawn(mockPi, mockCtx, "general-purpose", "test1", {
+      description: "running agent",
+      isBackground: true,
+    });
+    const queuedId = manager.spawn(mockPi, mockCtx, "general-purpose", "test2", {
+      description: "queued agent",
+      isBackground: true,
+    });
+
+    expect(manager.getRecord(queuedId)!.status).toBe("queued");
+    expect(manager.abort(queuedId)).toBe(true);
+    expect(manager.getRecord(queuedId)!.status).toBe("stopped");
+    expect(manager.getRecord(queuedId)!.stopRequested).toBe(false);
+    expect(completedRecord?.id).toBe(queuedId);
+
+    manager.abort(runningId);
+  });
 });
 
 describe("AgentManager — Bug 3 clearCompleted", () => {

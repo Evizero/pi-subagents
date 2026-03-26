@@ -145,9 +145,13 @@ function getLastAssistantText(session: AgentSession): string {
  * Wire an AbortSignal to abort a session.
  * Returns a cleanup function to remove the listener.
  */
-function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
+export function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
   if (!signal) return () => {};
   const onAbort = () => session.abort();
+  if (signal.aborted) {
+    onAbort();
+    return () => {};
+  }
   signal.addEventListener("abort", onAbort, { once: true });
   return () => signal.removeEventListener("abort", onAbort);
 }

@@ -69,6 +69,7 @@ vi.mock("../src/skill-loader.js", () => ({
 import {
   collectAppendModeToolInfo,
   createAppendModeResourceLoader,
+  forwardAbortSignal,
   resumeAgent,
   runAgent,
 } from "../src/agent-runner.js";
@@ -108,6 +109,19 @@ const pi = {} as any;
 
 beforeEach(() => {
   createAgentSession.mockReset();
+});
+
+describe("agent-runner abort handling", () => {
+  it("aborts immediately when the signal is already aborted", () => {
+    const session = { abort: vi.fn() } as any;
+    const controller = new AbortController();
+    controller.abort();
+
+    const cleanup = forwardAbortSignal(session, controller.signal);
+
+    expect(session.abort).toHaveBeenCalledOnce();
+    expect(() => cleanup()).not.toThrow();
+  });
 });
 
 describe("agent-runner final output capture", () => {

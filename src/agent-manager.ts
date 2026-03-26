@@ -177,14 +177,16 @@ export class AgentManager {
       },
     })
       .then(({ responseText, session, aborted, steered }) => {
-        // Don't overwrite status if externally stopped via abort()
-        if (record.status !== "stopped") {
+        if (record.stopRequested || record.status === "stopped") {
+          record.status = "stopped";
+        } else {
           record.status = aborted ? "aborted" : steered ? "steered" : "completed";
         }
         record.result = responseText;
         record.session = session;
         record.completedAt ??= Date.now();
         record.promiseSettled = true;
+        record.stopRequested = false;
 
         // Final flush of streaming output file
         if (record.outputCleanup) {
@@ -210,13 +212,15 @@ export class AgentManager {
         return responseText;
       })
       .catch((err) => {
-        // Don't overwrite status if externally stopped via abort()
-        if (record.status !== "stopped") {
+        if (record.stopRequested || record.status === "stopped") {
+          record.status = "stopped";
+        } else {
           record.status = "error";
         }
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt ??= Date.now();
         record.promiseSettled = true;
+        record.stopRequested = false;
 
         // Final flush of streaming output file on error
         if (record.outputCleanup) {
@@ -263,11 +267,44 @@ export class AgentManager {
     type: SubagentType,
     prompt: string,
     options: Omit<SpawnOptions, "isBackground">,
+    signal?: AbortSignal,
   ): Promise<AgentRecord> {
+    if (signal?.aborted) {
+      const now = Date.now();
+      return {
+        id: randomUUID().slice(0, 17),
+        type,
+        description: options.description,
+        origin: options.origin,
+        sessionId: options.sessionId,
+        isBackground: false,
+        promiseSettled: true,
+        backgroundSlotReleased: false,
+        detached: false,
+        abandoned: false,
+        notificationDelivered: false,
+        status: "stopped",
+        toolUses: 0,
+        startedAt: now,
+        completedAt: now,
+      };
+    }
+
     const id = this.spawn(pi, ctx, type, prompt, { ...options, isBackground: false });
     const record = this.agents.get(id)!;
-    await record.promise;
-    return record;
+
+    const onAbort = () => {
+      this.abort(id);
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      await record.promise;
+      return record;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   /**
@@ -326,15 +363,19 @@ export class AgentManager {
     // Remove from queue if queued
     if (record.status === "queued") {
       this.queue = this.queue.filter(q => q.id !== id);
+      record.stopRequested = false;
       record.status = "stopped";
       record.completedAt = Date.now();
+      record.promiseSettled = true;
+      if (record.isBackground) {
+        this.onComplete?.(record);
+      }
       return true;
     }
 
     if (record.status !== "running") return false;
+    record.stopRequested = true;
     record.abortController?.abort();
-    record.status = "stopped";
-    record.completedAt = Date.now();
     if (record.isBackground && !record.backgroundSlotReleased) {
       record.backgroundSlotReleased = true;
       this.runningBackground = Math.max(0, this.runningBackground - 1);

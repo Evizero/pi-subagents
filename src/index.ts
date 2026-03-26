@@ -1192,7 +1192,7 @@ Guidelines:
         thinkingLevel: thinking,
         isolation,
         ...fgCallbacks,
-      });
+      }, signal);
 
       clearInterval(spinnerInterval);
 
@@ -1213,6 +1213,10 @@ Guidelines:
 
       if (record.status === "error") {
         return textResult(`${fallbackNote}Agent failed: ${record.error}`, details);
+      }
+
+      if (record.status === "stopped") {
+        return textResult(`${fallbackNote}Agent stopped by user.`, details);
       }
 
       const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
@@ -1269,12 +1273,15 @@ Guidelines:
       const tokens = safeFormatTokens(record.session);
       const toolStats = tokens ? `Tool uses: ${record.toolUses} | ${tokens}` : `Tool uses: ${record.toolUses}`;
 
+      const statusText = record.stopRequested ? "stopping" : record.status;
       let output =
         `Agent: ${record.id}\n` +
-        `Type: ${displayName} | Status: ${record.status} | ${toolStats} | Duration: ${duration}\n` +
+        `Type: ${displayName} | Status: ${statusText} | ${toolStats} | Duration: ${duration}\n` +
         `Description: ${record.description}\n\n`;
 
-      if (record.status === "running") {
+      if (record.stopRequested) {
+        output += "Agent cancellation has been requested and is still unwinding.";
+      } else if (record.status === "running") {
         output += "Agent is still running. Use wait: true or check back later.";
       } else if (record.status === "error") {
         output += `Error: ${record.error}`;
@@ -1321,8 +1328,9 @@ Guidelines:
       if (!record) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
-      if (record.status !== "running") {
-        return textResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`);
+      if (record.status !== "running" || record.stopRequested) {
+        const statusText = record.stopRequested ? "stopping" : record.status;
+        return textResult(`Agent "${params.agent_id}" is not running (status: ${statusText}). Cannot steer a non-running agent.`);
       }
       if (!record.session) {
         // Session not ready yet — queue the steer for delivery once initialized
@@ -1478,7 +1486,8 @@ Guidelines:
     const options = agents.map(a => {
       const dn = getDisplayName(a.type);
       const dur = formatDuration(a.startedAt, a.completedAt);
-      return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
+      const status = a.stopRequested ? "stopping" : a.status;
+      return `${dn} (${a.description}) · ${a.toolUses} tools · ${status} · ${dur}`;
     });
 
     const choice = await ctx.ui.select("Running agents", options);
@@ -1488,6 +1497,50 @@ Guidelines:
     const idx = options.indexOf(choice);
     if (idx < 0) return;
     const record = agents[idx];
+
+    const actionOptions = ["View conversation"];
+    if (record.status === "running" || record.status === "queued") {
+      actionOptions.push(record.status === "queued" ? "Stop queued agent" : "Stop agent");
+    }
+    actionOptions.push("Back");
+
+    const action = await ctx.ui.select(`${getDisplayName(record.type)} (${record.description})`, actionOptions);
+    if (!action || action === "Back") {
+      await showRunningAgents(ctx);
+      return;
+    }
+
+    if (action.startsWith("Stop")) {
+      const currentRecord = manager.getRecord(record.id);
+      if (!currentRecord) {
+        ctx.ui.notify("Agent no longer exists.", "warning");
+        await showRunningAgents(ctx);
+        return;
+      }
+
+      const wasQueued = currentRecord.status === "queued";
+      if (wasQueued) {
+        currentRecord.notificationDelivered = true;
+      }
+
+      const stopped = manager.abort(currentRecord.id);
+      if (stopped) {
+        if (!wasQueued) {
+          currentRecord.notificationDelivered = true;
+        }
+        widget.update();
+        ctx.ui.notify(
+          wasQueued
+            ? `Stopped queued ${getDisplayName(currentRecord.type)} (${currentRecord.description}).`
+            : `Stopping ${getDisplayName(currentRecord.type)} (${currentRecord.description})...`,
+          "info",
+        );
+      } else {
+        ctx.ui.notify(`Agent is no longer running (status: ${currentRecord.stopRequested ? "stopping" : currentRecord.status}).`, "warning");
+      }
+      await showRunningAgents(ctx);
+      return;
+    }
 
     await viewAgentConversation(ctx, record);
     // Back-navigation: re-show the list
