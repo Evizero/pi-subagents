@@ -305,6 +305,17 @@ export default function (pi: ExtensionAPI) {
   // Initial load
   reloadCustomAgents();
 
+  /**
+   * Ignore lifecycle/UI events from ephemeral in-memory subagent sessions.
+   * Those child sessions bind extensions so their own session_start/tool events fire,
+   * but they share this extension instance's global state. Treating them like the
+   * interactive parent session can abort running agents, steal currentSessionId/UI,
+   * and suppress or misroute completion notifications.
+   */
+  function isEphemeralSubagentContext(ctx: ExtensionContext): boolean {
+    return ctx.hasUI === false && !ctx.sessionManager.getSessionFile();
+  }
+
   // ---- Agent activity tracking + widgets ----
   const agentActivity = new Map<string, AgentActivity>();
   let currentSessionId: string | undefined;
@@ -633,10 +644,12 @@ export default function (pi: ExtensionAPI) {
 
   // Reset fully for /new and startup; soft-switch for /resume; treat /fork as a new session boundary.
   pi.on("session_start", (_event, ctx) => {
+    if (isEphemeralSubagentContext(ctx)) return;
     currentCtx = ctx;
     hardResetBackgroundStateForSessionChange(currentSessionId, ctx.sessionManager.getSessionId(), ctx.ui as UICtx);
   });
   pi.on("session_switch", (event, ctx) => {
+    if (isEphemeralSubagentContext(ctx)) return;
     currentCtx = ctx;
     if (event.reason === "resume") {
       softSwitchBackgroundStateForSessionChange(currentSessionId, ctx.sessionManager.getSessionId(), ctx.ui as UICtx);
@@ -645,6 +658,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
   pi.on("session_fork", (_event, ctx) => {
+    if (isEphemeralSubagentContext(ctx)) return;
     currentCtx = ctx;
     hardResetBackgroundStateForSessionChange(currentSessionId, ctx.sessionManager.getSessionId(), ctx.ui as UICtx);
   });
@@ -741,6 +755,7 @@ export default function (pi: ExtensionAPI) {
 
   // Re-register widgets when the per-turn UI context changes.
   pi.on("agent_start", async (_event, ctx) => {
+    if (isEphemeralSubagentContext(ctx)) return;
     setCurrentSessionId(ctx.sessionManager.getSessionId());
     widget.setUICtx(ctx.ui as UICtx);
     reportWidget.setUI(ctx.ui);
@@ -748,6 +763,7 @@ export default function (pi: ExtensionAPI) {
 
   // Grab UI context from first tool execution + clear lingering widget on new turn
   pi.on("tool_execution_start", async (_event, ctx) => {
+    if (isEphemeralSubagentContext(ctx)) return;
     setCurrentSessionId(ctx.sessionManager.getSessionId());
     widget.setUICtx(ctx.ui as UICtx);
     reportWidget.setUI(ctx.ui);
