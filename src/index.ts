@@ -533,7 +533,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Persist final record for cross-extension history reconstruction
-    pi.appendEntry("subagents:record", {
+    pi.appendEntry?.("subagents:record", {
       id: record.id, type: record.type, description: record.description,
       status: record.status, result: record.result, error: record.error,
       startedAt: record.startedAt, completedAt: record.completedAt,
@@ -649,15 +649,22 @@ export default function (pi: ExtensionAPI) {
     hardResetBackgroundStateForSessionChange(currentSessionId, ctx.sessionManager.getSessionId(), ctx.ui as UICtx);
   });
 
+  const rpcEvents = pi.events && typeof pi.events.on === "function" && typeof pi.events.emit === "function"
+    ? pi.events
+    : {
+        on: () => () => {},
+        emit: () => {},
+      };
+
   const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc, unsubStop: unsubStopRpc } = registerRpcHandlers({
-    events: pi.events,
+    events: rpcEvents,
     pi,
     getCtx: () => currentCtx,
     manager,
   });
 
   // Broadcast readiness so extensions loaded after us can discover us
-  pi.events.emit("subagents:ready", {});
+  rpcEvents.emit("subagents:ready", {});
 
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
@@ -980,8 +987,8 @@ Guidelines:
 
       const rawType = params.subagent_type as SubagentType;
       const resolved = resolveType(rawType);
-      const resolvedConfig = resolved ? getAgentConfig(resolved) : undefined;
-      if (resolved && resolvedConfig?.enabled === false) {
+      const resolvedAgentConfig = resolved ? getAgentConfig(resolved) : undefined;
+      if (resolved && resolvedAgentConfig?.enabled === false) {
         return textResult(
           `Agent type "${resolved}" is disabled. Enable it in /agents or remove enabled: false from its .md file.`,
         );
@@ -994,25 +1001,25 @@ Guidelines:
       // Get agent config (if any)
       const customConfig = getAgentConfig(subagentType);
 
-      const resolvedConfig = resolveAgentInvocationConfig(customConfig, params);
+      const invocationConfig = resolveAgentInvocationConfig(customConfig, params);
 
       // Resolve model from agent config first; tool-call params only fill gaps.
       let model = ctx.model;
-      if (resolvedConfig.modelInput) {
-        const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
+      if (invocationConfig.modelInput) {
+        const resolved = resolveModel(invocationConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
-          if (resolvedConfig.modelFromParams) return textResult(resolved);
+          if (invocationConfig.modelFromParams) return textResult(resolved);
           // config-specified: silent fallback to parent
         } else {
           model = resolved;
         }
       }
 
-      const thinking = resolvedConfig.thinking;
-      const inheritContext = resolvedConfig.inheritContext;
-      const runInBackground = resolvedConfig.runInBackground;
-      const isolated = resolvedConfig.isolated;
-      const isolation = resolvedConfig.isolation;
+      const thinking = invocationConfig.thinking;
+      const inheritContext = invocationConfig.inheritContext;
+      const runInBackground = invocationConfig.runInBackground;
+      const isolated = invocationConfig.isolated;
+      const isolation = invocationConfig.isolation;
 
       // Build display tags for non-default config
       const parentModelId = ctx.model?.id;
@@ -1026,7 +1033,7 @@ Guidelines:
       if (thinking) agentTags.push(`thinking: ${thinking}`);
       if (isolated) agentTags.push("isolated");
       if (isolation === "worktree") agentTags.push("worktree");
-      const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
+      const effectiveMaxTurns = normalizeMaxTurns(invocationConfig.maxTurns ?? getDefaultMaxTurns());
       // Shared base fields for all AgentDetails in this call
       const detailBase = {
         displayName,
