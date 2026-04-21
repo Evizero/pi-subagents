@@ -1,14 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createAgentSession } = vi.hoisted(() => ({
+const { createAgentSession, loaderState } = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
+  loaderState: {
+    extensions: [] as any[],
+  },
 }));
 
 vi.mock("@mariozechner/pi-coding-agent", () => ({
   createAgentSession,
+  getAgentDir: vi.fn(() => "/tmp/.pi/agent"),
   DefaultResourceLoader: class {
     async reload() {}
-    getExtensions() { return { extensions: [], runtime: {} }; }
+    getExtensions() { return { extensions: loaderState.extensions, runtime: {} }; }
     getSkills() { return { skills: [], diagnostics: [] }; }
     getPrompts() { return { prompts: [], diagnostics: [] }; }
     getThemes() { return { themes: [], diagnostics: [] }; }
@@ -23,11 +27,12 @@ vi.mock("@mariozechner/pi-coding-agent", () => ({
 }));
 
 vi.mock("../src/agent-types.js", () => ({
+  BUILTIN_TOOL_NAMES: ["read", "bash", "edit", "write", "grep", "find", "ls"],
   getConfig: vi.fn(() => ({
     displayName: "Explore",
     description: "Explore",
     builtinToolNames: ["read"],
-    extensions: false,
+    extensions: true,
     skills: false,
     promptMode: "replace",
   })),
@@ -35,7 +40,7 @@ vi.mock("../src/agent-types.js", () => ({
     name: "Explore",
     description: "Explore",
     builtinToolNames: ["read"],
-    extensions: false,
+    extensions: true,
     skills: false,
     systemPrompt: "You are Explore.",
     promptMode: "replace",
@@ -43,9 +48,9 @@ vi.mock("../src/agent-types.js", () => ({
     runInBackground: false,
     isolated: false,
   })),
-  getMemoryTools: vi.fn(() => []),
-  getReadOnlyMemoryTools: vi.fn(() => []),
-  getToolsForType: vi.fn(() => [{ name: "read" }]),
+  getMemoryToolNames: vi.fn(() => []),
+  getReadOnlyMemoryToolNames: vi.fn(() => []),
+  getToolNamesForType: vi.fn(() => ["read"]),
 }));
 
 vi.mock("../src/env.js", () => ({
@@ -73,8 +78,12 @@ import {
   resumeAgent,
   runAgent,
 } from "../src/agent-runner.js";
+import { getToolNamesForType } from "../src/agent-types.js";
 
-function createSession(finalText: string) {
+function createSession(
+  finalText: string,
+  allTools: Array<{ name: string; sourceInfo?: { source?: string } }> = [{ name: "read" }],
+) {
   const listeners: Array<(event: any) => void> = [];
   const session = {
     messages: [] as any[],
@@ -91,6 +100,7 @@ function createSession(finalText: string) {
     abort: vi.fn(),
     steer: vi.fn(),
     getActiveToolNames: vi.fn(() => ["read"]),
+    getAllTools: vi.fn(() => allTools),
     setActiveToolsByName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
   };
@@ -109,6 +119,8 @@ const pi = {} as any;
 
 beforeEach(() => {
   createAgentSession.mockReset();
+  loaderState.extensions = [];
+  vi.mocked(getToolNamesForType).mockReturnValue(["read"]);
 });
 
 describe("agent-runner abort handling", () => {
@@ -148,6 +160,41 @@ describe("agent-runner final output capture", () => {
     const bindOrder = session.bindExtensions.mock.invocationCallOrder[0];
     const promptOrder = session.prompt.mock.invocationCallOrder[0];
     expect(bindOrder).toBeLessThan(promptOrder);
+  });
+
+  it("passes the allowed tool set into createAgentSession", async () => {
+    loaderState.extensions = [{
+      tools: new Map([
+        ["ext_tool", { definition: { description: "Extension tool" } }],
+      ]),
+    }];
+    const { session } = createSession("TOOLS", [
+      { name: "read", sourceInfo: { source: "builtin" } },
+      { name: "bash", sourceInfo: { source: "builtin" } },
+      { name: "Agent", sourceInfo: { source: "sdk" } },
+      { name: "ext_tool", sourceInfo: { source: "test-extension" } },
+    ]);
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "Use tools", { pi });
+
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      tools: ["read", "ext_tool"],
+    }));
+    expect(session.setActiveToolsByName).toHaveBeenCalledWith(["read", "ext_tool"]);
+  });
+
+  it("keeps extension overrides of built-in names active", async () => {
+    vi.mocked(getToolNamesForType).mockReturnValue([]);
+    const { session } = createSession("OVERRIDE", [
+      { name: "read", sourceInfo: { source: "sandboxed-extension" } },
+      { name: "bash", sourceInfo: { source: "builtin" } },
+    ]);
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "Use override", { pi });
+
+    expect(session.setActiveToolsByName).toHaveBeenCalledWith(["read"]);
   });
 
   it("resumeAgent also falls back to the final assistant message text", async () => {

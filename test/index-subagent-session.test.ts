@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<any>("../src/agent-runner.js");
@@ -16,8 +16,8 @@ vi.mock("../src/agent-runner.js", async () => {
   };
 });
 
-import extension from "../src/index.js";
 import { runAgent } from "../src/agent-runner.js";
+import extension from "../src/index.js";
 
 function flushMicrotasks() {
   return Promise.resolve();

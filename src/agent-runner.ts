@@ -10,11 +10,18 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionAPI,
+  getAgentDir,
   type ResourceLoader,
   SessionManager,
   SettingsManager,
 } from "@mariozechner/pi-coding-agent";
-import { getAgentConfig, getConfig, getMemoryTools, getReadOnlyMemoryTools, getToolsForType } from "./agent-types.js";
+import {
+  getAgentConfig,
+  getConfig,
+  getMemoryToolNames,
+  getReadOnlyMemoryToolNames,
+  getToolNamesForType,
+} from "./agent-types.js";
 import { buildParentContext, extractText } from "./context.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
@@ -199,7 +206,7 @@ export function createAppendModeResourceLoader(
   baseLoader: ResourceLoader,
   buildSynthesizedPrompt: () => string,
 ): ResourceLoader {
-  return {
+  const loader = {
     getExtensions: () => baseLoader.getExtensions(),
     getSkills: () => ({
       skills: baseLoader.getSkills().skills.map(skill => ({ ...skill, disableModelInvocation: true })),
@@ -210,10 +217,90 @@ export function createAppendModeResourceLoader(
     getAgentsFiles: () => ({ agentsFiles: [] }),
     getSystemPrompt: () => buildSynthesizedPrompt(),
     getAppendSystemPrompt: () => [],
-    getPathMetadata: () => baseLoader.getPathMetadata(),
-    extendResources: (paths) => baseLoader.extendResources(paths),
+    getPathMetadata: () => getPathMetadata(baseLoader),
+    extendResources: (paths: Parameters<ResourceLoader["extendResources"]>[0]) => baseLoader.extendResources(paths),
     reload: async () => { await baseLoader.reload(); },
   };
+  return loader as ResourceLoader;
+}
+
+function getPathMetadata(loader: ResourceLoader): Map<string, unknown> {
+  const maybeGetPathMetadata = (loader as { getPathMetadata?: () => Map<string, unknown> }).getPathMetadata;
+  return typeof maybeGetPathMetadata === "function" ? maybeGetPathMetadata.call(loader) : new Map();
+}
+
+function matchesExtensionSelector(
+  toolName: string,
+  source: unknown,
+  selectors: string[],
+): boolean {
+  const sourceName = typeof source === "string" ? source : "";
+  return selectors.some(selector => (
+    toolName === selector
+    || toolName.startsWith(selector)
+    || toolName.includes(selector)
+    || (sourceName !== "" && sourceName !== "builtin" && sourceName !== "sdk"
+      && (sourceName === selector || sourceName.includes(selector)))
+  ));
+}
+
+function collectAllowedToolNames(
+  requestedToolNames: string[],
+  loader: ResourceLoader,
+  options: { extensions: true | string[] | false; disallowedSet?: Set<string> },
+): string[] {
+  const allowedToolNames: string[] = [];
+  const seen = new Set<string>();
+  const push = (toolName: string) => {
+    if (seen.has(toolName)) return;
+    seen.add(toolName);
+    allowedToolNames.push(toolName);
+  };
+
+  for (const toolName of requestedToolNames) {
+    if (EXCLUDED_TOOL_NAMES.includes(toolName)) continue;
+    if (options.disallowedSet?.has(toolName)) continue;
+    push(toolName);
+  }
+
+  if (options.extensions === false) return allowedToolNames;
+
+  for (const extension of loader.getExtensions().extensions) {
+    for (const [toolName, registeredTool] of extension.tools) {
+      if (EXCLUDED_TOOL_NAMES.includes(toolName)) continue;
+      if (options.disallowedSet?.has(toolName)) continue;
+      const extensionSource = (registeredTool as { sourceInfo?: { source?: unknown } }).sourceInfo?.source;
+      if (Array.isArray(options.extensions) && !matchesExtensionSelector(toolName, extensionSource, options.extensions)) {
+        continue;
+      }
+      push(toolName);
+    }
+  }
+
+  return allowedToolNames;
+}
+
+function chooseActiveToolNames(
+  session: AgentSession,
+  requestedToolNames: string[],
+  options: { extensions: true | string[] | false; disallowedSet?: Set<string> },
+): string[] {
+  const requestedSet = new Set(requestedToolNames);
+  return session.getAllTools()
+    .filter((tool) => {
+      const toolName = tool.name;
+      if (EXCLUDED_TOOL_NAMES.includes(toolName)) return false;
+      if (options.disallowedSet?.has(toolName)) return false;
+      if (requestedSet.has(toolName)) return true;
+      const source = (tool as { sourceInfo?: { source?: unknown } }).sourceInfo?.source;
+      if (source === "builtin") return false;
+      if (options.extensions === false) return false;
+      if (Array.isArray(options.extensions)) {
+        return matchesExtensionSelector(toolName, source, options.extensions);
+      }
+      return true;
+    })
+    .map(tool => tool.name);
 }
 
 export async function runAgent(
@@ -227,6 +314,7 @@ export async function runAgent(
 
   // Resolve working directory: worktree override > parent cwd
   const effectiveCwd = options.cwd ?? ctx.cwd;
+  const agentDir = getAgentDir();
 
   const env = await detectEnv(options.pi, effectiveCwd);
   const parentSystemPrompt = ctx.getSystemPrompt();
@@ -246,26 +334,26 @@ export async function runAgent(
     }
   }
 
-  let tools = getToolsForType(type, effectiveCwd);
+  let builtinToolNames = getToolNamesForType(type);
 
   // Persistent memory: detect write capability and branch accordingly.
   // Account for disallowedTools — a tool in the base set but on the denylist is not truly available.
   if (agentConfig?.memory) {
-    const existingNames = new Set(tools.map(t => t.name));
+    const existingNames = new Set(builtinToolNames);
     const denied = agentConfig.disallowedTools ? new Set(agentConfig.disallowedTools) : undefined;
     const effectivelyHas = (name: string) => existingNames.has(name) && !denied?.has(name);
     const hasWriteTools = effectivelyHas("write") || effectivelyHas("edit");
 
     if (hasWriteTools) {
       // Read-write memory: add any missing memory tools (read/write/edit)
-      const memTools = getMemoryTools(effectiveCwd, existingNames);
-      if (memTools.length > 0) tools = [...tools, ...memTools];
+      const memTools = getMemoryToolNames(existingNames);
+      if (memTools.length > 0) builtinToolNames = [...builtinToolNames, ...memTools];
       extras.memoryBlock = buildMemoryBlock(agentConfig.name, agentConfig.memory, effectiveCwd);
     } else {
       // Read-only memory: only add read tool, use read-only prompt
       if (!existingNames.has("read")) {
-        const readTools = getReadOnlyMemoryTools(effectiveCwd, existingNames);
-        if (readTools.length > 0) tools = [...tools, ...readTools];
+        const readTools = getReadOnlyMemoryToolNames(existingNames);
+        if (readTools.length > 0) builtinToolNames = [...builtinToolNames, ...readTools];
       }
       extras.memoryBlock = buildReadOnlyMemoryBlock(agentConfig.name, agentConfig.memory, effectiveCwd);
     }
@@ -297,6 +385,7 @@ export async function runAgent(
   // First pass loader: discover extension tools, context files, append files, and optional skills.
   let loader: ResourceLoader = new DefaultResourceLoader({
     cwd: effectiveCwd,
+    agentDir,
     noExtensions: extensions === false,
     noSkills,
     noPromptTemplates: true,
@@ -305,9 +394,7 @@ export async function runAgent(
   await loader.reload();
 
   if (promptConfig.promptMode === "append") {
-    const baseToolNames = tools
-      .map(t => t.name)
-      .filter(name => !disallowedSet?.has(name));
+    const baseToolNames = builtinToolNames.filter(name => !disallowedSet?.has(name));
 
     const baseLoader = loader;
     const buildSynthesizedPrompt = () => buildAppendModeSystemPrompt(promptConfig, effectiveCwd, env, {
@@ -327,6 +414,7 @@ export async function runAgent(
   } else {
     loader = new DefaultResourceLoader({
       cwd: effectiveCwd,
+      agentDir,
       noExtensions: extensions === false,
       noSkills,
       noPromptTemplates: true,
@@ -344,14 +432,16 @@ export async function runAgent(
   // Resolve thinking level: explicit option > agent config > undefined (inherit)
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
 
+  const allowedToolNames = collectAllowedToolNames(builtinToolNames, loader, { extensions, disallowedSet });
+
   const sessionOpts: Record<string, unknown> = {
     cwd: effectiveCwd,
     sessionManager: SessionManager.inMemory(effectiveCwd),
-    settingsManager: SettingsManager.create(),
+    settingsManager: SettingsManager.create(effectiveCwd, agentDir),
     modelRegistry: ctx.modelRegistry,
     model,
-    tools,
     resourceLoader: loader,
+    tools: allowedToolNames,
   };
   if (thinkingLevel) {
     sessionOpts.thinkingLevel = thinkingLevel;
@@ -360,25 +450,9 @@ export async function runAgent(
   // createAgentSession's type signature may not include thinkingLevel yet
   const { session } = await createAgentSession(sessionOpts as Parameters<typeof createAgentSession>[0]);
 
-  // Filter active tools: remove our own tools to prevent nesting,
-  // apply extension allowlist if specified, and apply disallowedTools denylist
-  if (extensions !== false) {
-    const builtinToolNames = new Set(tools.map(t => t.name));
-    const activeTools = session.getActiveToolNames().filter((t) => {
-      if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
-      if (disallowedSet?.has(t)) return false;
-      if (builtinToolNames.has(t)) return true;
-      if (Array.isArray(extensions)) {
-        return extensions.some(ext => t.startsWith(ext) || t.includes(ext));
-      }
-      return true;
-    });
-    session.setActiveToolsByName(activeTools);
-  } else if (disallowedSet) {
-    // Even with extensions disabled, apply denylist to built-in tools
-    const activeTools = session.getActiveToolNames().filter(t => !disallowedSet.has(t));
-    session.setActiveToolsByName(activeTools);
-  }
+  // Filter active tools: remove our own tools to prevent nesting, keep the
+  // requested tool set active, apply extension allowlists, and enforce denylist rules.
+  session.setActiveToolsByName(chooseActiveToolNames(session, allowedToolNames, { extensions, disallowedSet }));
 
   // Bind extensions so that session_start fires and extensions can initialize
   // (e.g. loading credentials, setting up state). Placed after tool filtering

@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { afterEach, describe, expect, it } from "vitest";
 import extension from "../src/index.js";
 
 const theme = {

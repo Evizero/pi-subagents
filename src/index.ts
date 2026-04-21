@@ -348,7 +348,7 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  function buildSingleCompletionMessage(record: AgentRecord, titlePrefix: string, includeGetResultHint = true) {
+  function _buildSingleCompletionMessage(record: AgentRecord, titlePrefix: string, includeGetResultHint = true) {
     const displayName = getDisplayName(record.type);
     const duration = formatDuration(record.startedAt, record.completedAt);
     const status = getStatusLabel(record.status, record.error);
@@ -643,12 +643,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Reset fully for /new and startup; soft-switch for /resume; treat /fork as a new session boundary.
-  pi.on("session_start", (_event, ctx) => {
-    if (isEphemeralSubagentContext(ctx)) return;
-    currentCtx = ctx;
-    hardResetBackgroundStateForSessionChange(currentSessionId, ctx.sessionManager.getSessionId(), ctx.ui as UICtx);
-  });
-  pi.on("session_switch", (event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
     if (isEphemeralSubagentContext(ctx)) return;
     currentCtx = ctx;
     if (event.reason === "resume") {
@@ -656,11 +651,6 @@ export default function (pi: ExtensionAPI) {
     } else {
       hardResetBackgroundStateForSessionChange(currentSessionId, ctx.sessionManager.getSessionId(), ctx.ui as UICtx);
     }
-  });
-  pi.on("session_fork", (_event, ctx) => {
-    if (isEphemeralSubagentContext(ctx)) return;
-    currentCtx = ctx;
-    hardResetBackgroundStateForSessionChange(currentSessionId, ctx.sessionManager.getSessionId(), ctx.ui as UICtx);
   });
 
   const rpcEvents = pi.events && typeof pi.events.on === "function" && typeof pi.events.emit === "function"
@@ -2054,7 +2044,7 @@ ${systemPrompt}
       const shortSha = sha.slice(0, 7);
       return {
         prompt: title
-          ? `Review the code changes introduced by commit ${sha} (\"${title}\"). Provide prioritized, actionable findings.`
+          ? `Review the code changes introduced by commit ${sha} ("${title}"). Provide prioritized, actionable findings.`
           : `Review the code changes introduced by commit ${sha}. Provide prioritized, actionable findings.`,
         description: `Review commit ${shortSha}`,
         target: title ? `commit ${shortSha}: ${title}` : `commit ${shortSha}`,

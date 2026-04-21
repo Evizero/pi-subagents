@@ -113,35 +113,50 @@ export function isValidType(type: string): boolean {
 const MEMORY_TOOL_NAMES = ["read", "write", "edit"];
 
 /**
+ * Get the memory tool names that are not already active.
+ */
+export function getMemoryToolNames(existingToolNames: Set<string>): string[] {
+  return MEMORY_TOOL_NAMES.filter(n => !existingToolNames.has(n) && n in TOOL_FACTORIES);
+}
+
+/**
  * Get the tools needed for memory management (read, write, edit).
  * Only returns tools that are NOT already in the provided set.
  */
 export function getMemoryTools(cwd: string, existingToolNames: Set<string>): AgentTool<any>[] {
-  return MEMORY_TOOL_NAMES
-    .filter(n => !existingToolNames.has(n) && n in TOOL_FACTORIES)
-    .map(n => TOOL_FACTORIES[n](cwd));
+  return getMemoryToolNames(existingToolNames).map(n => TOOL_FACTORIES[n](cwd));
 }
 
 /** Tool names needed for read-only memory access. */
 const READONLY_MEMORY_TOOL_NAMES = ["read"];
 
 /**
+ * Get the read-only memory tool names that are not already active.
+ */
+export function getReadOnlyMemoryToolNames(existingToolNames: Set<string>): string[] {
+  return READONLY_MEMORY_TOOL_NAMES.filter(n => !existingToolNames.has(n) && n in TOOL_FACTORIES);
+}
+
+/**
  * Get only the read tool for read-only memory access.
  * Only returns tools that are NOT already in the provided set.
  */
 export function getReadOnlyMemoryTools(cwd: string, existingToolNames: Set<string>): AgentTool<any>[] {
-  return READONLY_MEMORY_TOOL_NAMES
-    .filter(n => !existingToolNames.has(n) && n in TOOL_FACTORIES)
-    .map(n => TOOL_FACTORIES[n](cwd));
+  return getReadOnlyMemoryToolNames(existingToolNames).map(n => TOOL_FACTORIES[n](cwd));
 }
 
-/** Get built-in tools for a type (case-insensitive). */
-export function getToolsForType(type: string, cwd: string): AgentTool<any>[] {
+/** Get built-in tool names for a type (case-insensitive). */
+export function getToolNamesForType(type: string): string[] {
   const key = resolveKey(type);
   const raw = key ? agents.get(key) : undefined;
   const config = raw?.enabled !== false ? raw : undefined;
   const toolNames = config?.builtinToolNames?.length ? config.builtinToolNames : BUILTIN_TOOL_NAMES;
-  return toolNames.filter((n) => n in TOOL_FACTORIES).map((n) => TOOL_FACTORIES[n](cwd));
+  return toolNames.filter((n) => n in TOOL_FACTORIES);
+}
+
+/** Get built-in tools for a type (case-insensitive). */
+export function getToolsForType(type: string, cwd: string): AgentTool<any>[] {
+  return getToolNamesForType(type).map((n) => TOOL_FACTORIES[n](cwd));
 }
 
 /** Get config for a type (case-insensitive, returns a SubagentTypeConfig-compatible object). Falls back to general-purpose. */
@@ -189,4 +204,3 @@ export function getConfig(type: string): {
     promptMode: "append",
   };
 }
-
